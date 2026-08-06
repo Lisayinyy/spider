@@ -318,7 +318,8 @@ float spiderMark(vec2 p){
 
 /* 面罩眼睛 SDF：内侧尖、外侧圆的杏仁形。
    sz = 眼间距(span) * 用户系数；单眼半宽 ≈ 0.52*sz —— 蜘蛛侠面罩的眼几乎两眼相接，
-   这个比例是「像不像」的关键，之前给 0.128 结果小到看不见。 */
+   这个比例是「像不像」的关键，之前给 0.128 结果小到看不见。
+   约定：调用方已把坐标镜像成 +x = 面部外侧、-x = 鼻梁内侧。 */
 float eyeShape(vec2 q, float sz){
   q /= max(sz, 1e-4);
   q = rot(0.22) * q;                                    // 外侧上扬
@@ -327,6 +328,48 @@ float eyeShape(vec2 q, float sz){
   float n = 2.7;
   float k = pow(pow(abs(t.x),n) + pow(abs(t.y),n), 1.0/n);
   return (k - 1.0) * 0.345 * max(sz,1e-4);
+}
+
+/* 格温专属眼罩 SDF（Ghost-Spider / Into the Spider-Verse）。
+
+   ★ 形状是**旋转超椭圆**，不是水滴、不是弯刀。
+   这一版不是看图猜的，是把 ref/vecdetail/gwen_full.png 的眼白连通域抠出来，
+   在 Python 里对「旋转超椭圆」族做 IoU 网格搜索拟合出来的：
+     左眼 IoU=0.932 (ang=+54)   右眼 IoU=0.930 (ang=-50)   —— 左右镜像一致
+   之前两版（水滴 / 弯刀）都是靠「中心线弯曲 + 变半厚」拼形状，IoU 只有 0.559，
+   而且拟合参数全部顶在搜索区间边界上 —— 这是「模型族选错了」的典型信号。
+
+   实测参数（以参考图头宽 headSpan=316px 归一化，两眼中心距 sep=135px=0.427*headSpan）：
+     长半轴 A = 0.174 * headSpan = 0.407 * sep
+     短半轴 B = 0.089 * headSpan = 0.207 * sep     （长短轴比 ~2:1）
+     倾角   = ±52 度（长轴从内上方 -> 外下方），超椭圆指数 n = 2.2
+   注意倾角方向：长轴内侧端**偏上**、外侧端**偏下**，这是格温眼罩的辨识特征。
+
+   本函数用 sz 归一化（sz = span*uEyeSize），A/B 换算成 sz 单位见下。
+   注意：shader 内嵌在 JS 模板字符串里，注释里不能出现反引号。 */
+float eyeShapeGwen(vec2 q, float sz){
+  float s = max(sz, 1e-4);
+  q /= s;
+  // 长轴倾角。+x 是「朝外侧」，本 shader 的 +y **向下**（见下方穿孔区 q.y>archY 判据）。
+  // 实测两个符号都渲染对比过：-52 度才是参考图那种「内角高、外角低」的走向；
+  // 换成 +52 度会变成一对朝反方向的窄缝（外角上翘），一眼就错。
+  const float ANG = -0.9076;                  // -52 度
+  float ca = cos(ANG), sa = sin(ANG);
+  vec2 t = vec2(q.x*ca + q.y*sa, -q.x*sa + q.y*ca);
+  /* 半轴。原始拟合值是 A=0.375、B=0.191（eyeGap=0.46 时），那是**照参考图的绝对比例**。
+     但我们这套假 mask 的头比参考图更瘦：
+       参考图 眼区总宽/头宽 = 207/349 = 0.593
+       我们   眼区总宽/头宽 = 137/203 = 0.675   （眼睛相对头部大了 14%）
+     结果两侧留白只有 0.163*头宽（参考 0.203），兜帽根本没地方长 ——
+     探针实测那一版 hood 压掉了 **45% 的眼白**，而"hood/head 面积比"这个指标
+     看起来还是漂亮的 0.416，完全没报警。
+     所以把 A / B / eyeGap **同乘 0.879** 收到参考图的比例（形状长宽比不变）。
+     教训：面积比这类单一标量指标会掩盖"两个部件抢地方"的冲突，
+     必须另外量**部件之间的重叠**（这里是 eye ∩ hood）才看得出来。 */
+  const float A = 0.3295, B = 0.1678;
+  float n = 2.2;
+  float k = pow(pow(abs(t.x/A), n) + pow(abs(t.y/B), n), 1.0/n);
+  return (k - 1.0) * B * s;                   // 乘 B 让梯度接近真实距离（描边宽度才稳）
 }
 
 
@@ -584,8 +627,19 @@ void main(){
   // 胸口正中往下是一大块黑（黑色从领口一路连到腿），白蜘蛛压在这块黑上。
   // 旧版按经典款「腰以下变黑」，于是胸口是白的、白蛛徽画在白底上直接隐形。
   if(uSkin==1){
-    // 中央黑色区：领口下方开始，横向占躯干中段，向下一直到脚
-    float coreY = smoothstep(0.16, 0.26, vv);                      // 领口以下
+    /* 中央黑色区。★ 位置是量参考图定的，不是照经典款猜的：
+       沿参考图躯干中线（x=680）纵向扫描白/暗像素，白色一路延伸到画面底部
+       （眼中心下方 3.2*span 还是白的）—— 也就是**格温的胸腹基本全是白的**，
+       黑色只是两侧垂下的长发 + 更低处的一点暗区。
+       旧值 coreY = smoothstep(0.16, 0.26, vv) 从领口下方就转黑，
+       整个胸腹读成一大块黑，跟参考图正好相反。
+
+       这个错之前一直**被兜帽的溢出盖住了**：旧 headZone 放到 span*3.6，
+       帽体白布一路铺满肩和上胸，正好糊在这块黑上，看起来"胸是白的"。
+       把 headZone 收到脖子（正确）以后，这块黑才露出来。
+       教训：一处 bug 的表现被另一处 bug 掩盖时，修好第一处会"看起来变差"——
+       要用 bisect 确认到底是新改动坏了，还是旧问题终于露出来了。 */
+    float coreY = smoothstep(0.62, 0.74, vv);                      // 腹部以下才转黑
     float coreX = 1.0 - smoothstep(0.30, 0.46, abs(uuC));          // 躯干中段
     float core  = coreY * coreX;
     // 腰以下整体转黑（腿是黑紧身裤）
@@ -663,30 +717,69 @@ void main(){
   vec3 webLine = webC * (0.82 + 0.36*vnoise(P*40.0));
   base = mix(base, webLine, web*0.90);
 
-  /* ---- 格温的手臂菱形网 ----
-     参照海报：格温的**袖子整条都是洋红菱形网格**，是这套战衣最抢眼的部分。
-     不能沿用以胸口为心的径向网：手臂离胸口远，径向线在那儿张成大扇形，
-     读起来是"辐射线"不是"网格"（实测手臂 r 峰值只有 19，几乎没网）。
-     所以单独铺一层旋转 45° 的正交格线，跟着 body 空间缩放。 */
+  float pinkDbg = 0.0;    // 粉块覆盖，仅给 uDebug==4 的几何探针用
+  /* ---- 格温的粉色菱形网块 ----
+     参照 ref/vecdetail/gwen_c.png 放大实测，之前整套理解是错的：
+     - **袖子/手臂是纯白的，一点粉都没有**（旧版把网铺满整条手臂 = "粉袖子"）
+     - 粉色是「腋下 / 侧腰 / 胸侧」的一整块，边界是硬的曲线（漫画分色，不是渐变）
+     - 粉块上的网线是**白色**，底是粉的 —— 跟旧版（白底 + 洋红网线）正好反过来
+     所以这里改成：先按 torsoU/vv 划出硬边粉块，再在块内画白网线。 */
   if(uSkin==1){
-    // 密度实测：26.0 在手臂这种窄区会挤出极密的网，线再细也占满 —— 归因实验里
-    // 关掉这层网，手臂粉 28%→1%、白 11%→38%，它是"整条粉袖子"的唯一主凶
-    // （边光只贡献 0%，帽口内衬贡献约 11%）。降到 13.0 = 网格放大一倍。
-    vec2 dq = rot(0.785) * (Bm * 20.0);                  // 旋转 45° -> 菱形
+    /* 粉块区域。★ 大小是按**面积比**校准的，不是按"看着差不多"：
+       在参考图里把人物整体抠出来（白布+粉+肤色+黑发的并集做闭运算+填洞），
+       再数亮洋红像素 —— 参考图 pink/person = 0.073。
+       而旧参数（sideX 内边界 0.50、外 1.02）实测 pink/suit = 0.249，**超了 3.4 倍**，
+       屏幕上就是两块巨大的粉色肩甲盖住半个身子。
+       numpy 复刻本判据扫参数，内边界推到 0.86、外边界 1.10 时得到 0.074 ✓，
+       同时把粉挪到"外侧手臂/侧腰"这个参考图里真正的位置。 */
+    /* torsoU 是**逐行**算的（rowC/rowHW 每条扫描线一组），所以拿它做很陡的阈值时，
+       边界会跟着每行的 rowHW 抖动，渲染出阶梯状锯齿。
+       粉块的内外边界正好落在手臂根部——那里 rowHW 逐行变化最剧烈——所以最明显。
+       把过渡带从 0.10 放宽到 0.16，让相邻行的边界能互相重叠，阶梯就被抹平；
+       中点不变（0.86+0.08 vs 0.86+0.05），面积比基本不动。 */
+    float sideX = smoothstep(0.80, 0.96, abs(torsoU))          // 内边界（靠躯干中线一侧）
+                * (1.0 - smoothstep(1.10, 1.30, abs(torsoU))); // 外边界（不要爬上手臂）
+    // 上缘随外侧位置抬高 -> 斜切的腋下线；下缘在侧腰收住
+    float topY  = mix(0.34, 0.22, smoothstep(0.86, 1.05, abs(torsoU)));
+    float sideY = smoothstep(topY, topY + 0.07, vv)
+                * (1.0 - smoothstep(0.58, 0.68, vv));
+    // 硬边：漫画分色没有羽化过渡，smoothstep 之后再二值化一次。
+    // 注意**不要再乘 armAmt**：armAmt = smoothstep(1.04,1.45,|torsoU|)*(1-smoothstep(0.55,0.68,vv))
+    // 在肩部（vv 小）本身就是大值，会把粉块上半整块门控掉。
+    // 分带实测（探针 mask 内按行分 5 段）：乘 armAmt 时下段粉 83.2%、中段 18.4%、
+    // 上段只剩 2.2% —— 粉块上半消失就是这一乘造成的，外边界已由 sideX 管住了。
+    float pinkBlock = smoothstep(0.42, 0.58, sideX * sideY);
+    pinkDbg = pinkBlock;
+
+    // 白色菱形网线（画在粉块上）。
+    // 线宽和 alpha 都必须按实测定：smoothstep(0.90,0.985) 在这个密度下实测覆盖率
+    // 达 35%（uDebug 探针量 diamond*pinkBlock 的 ROI 均值 89/255），再用 0.85 混白
+    // 会把粉底冲成淡粉近白（debug 输出 base ROI 均值 231,214,224 = 几乎全白）。
+    // 跟之前踩过的坑一样：这种高覆盖率靠收线宽治不了，必须**降 alpha**。
+    /* 网格：参考图放大（ref_arm2）实测是**正方格**，不是 45° 菱形 ——
+       网线沿身体的横竖方向走，只因为手臂有透视才看着斜。旧版转了 45°。
+       线色也不是纯白，是偏淡紫的白（洋红底上的白线会被邻近色影响）。 */
+    vec2 dq = Bm * 16.0;                                 // 正方格（不旋转）
     vec2 dg = abs(fract(dq) - 0.5) * 2.0;
-    // 线宽必须细：参考图里白布是主色、洋红只是细网线。
-    // 旧版 smoothstep(0.80,0.94) + 0.80 混合让粉像素占到 88%，整条手臂读成"粉袖子"，
-    // 白色辨识度全丢。收到 (0.90,0.985) 后线宽约为原来 1/3，白布重新成为主色。
-    float diamond = max(1.0 - smoothstep(0.94, 0.995, dg.x),
-                        1.0 - smoothstep(0.94, 0.995, dg.y));
-    // 只铺在白色区（手臂/肩/兜帽），黑色胸腹保持干净（参考图如此）
-    float dGate = (1.0 - coolAmt*0.96) * step(0.5, uWebDens);
-    float dWeb = diamond * dGate;
-    base = mix(base, webC * (0.86 + 0.28*vnoise(P*36.0)), dWeb*0.42);
-    // 网线两侧的浅阴影，让网格有一点凸起感
-    float dShadow = max(1.0 - smoothstep(0.78, 0.92, dg.x),
-                        1.0 - smoothstep(0.78, 0.92, dg.y)) * (1.0-diamond) * dGate;
-    base *= 1.0 - dShadow*0.10;
+    float diamond = max(1.0 - smoothstep(0.955, 0.995, dg.x),
+                        1.0 - smoothstep(0.955, 0.995, dg.y));
+    /* dGate 只门控**白网线**这一件事。
+       曾经把 dGate 乘在粉底/自发光/描边上，于是 uWebDens=0 时整块粉都消失 ——
+       "网线开/关"和"粉块开/关"变成同一个开关，任何断言都区分不出"网真的存在"，
+       只能证明"粉块存在"。门控的粒度必须和被测的那个特征一一对应。 */
+    float dGate = step(0.5, uWebDens);
+
+    // 先铺粉底，再压白网线。
+    // 粉色要打得比目标更足：后面还要过 shade = base*(0.52+0.72*lam)，
+    // 在 lam 中等的躯干侧面会被压掉近一半亮度，写 (1.0,0.10,0.56) 上屏只有 r-g≈29 读成灰粉。
+    vec3 pinkC = vec3(1.0, 0.02, 0.48);
+    base = mix(base, pinkC * (0.96 + 0.08*vnoise(P*30.0)), pinkBlock);
+    base = mix(base, vec3(0.99,0.98,1.0), diamond * pinkBlock * 0.42 * dGate);
+    // 粉块本身补一点自发光，抵消光照压暗（漫画平涂不该有强明暗）
+    base = mix(base, pinkC*1.18, pinkBlock * 0.30);
+    // 粉块边缘的黑描边（漫画轮廓线）
+    float edge = (1.0 - smoothstep(0.0, 0.16, abs(sideX*sideY - 0.50)));
+    base = mix(base, vec3(0.06,0.03,0.08), edge*0.55);
   }
 
   /* ---- 胸口蛛徽 ----
@@ -700,12 +793,19 @@ void main(){
   vec2 mp = (P - chest - vec2(0.0, bs.y*markDrop)) / max(bs.y*markScale, 0.02);
   float sd = spiderMark(mp);
   float mark = (1.0 - smoothstep(0.0, 0.02, sd)) * uChest.z;
+  // 格温这一版**胸口没有蛛徽**（参考 ref/vecdetail/gwen_c.png：胸口是纯白 + 洋红 V 领，
+  // 蛛徽在背后）。旧版在这儿画白蜘蛛，既不像参考图、又在白布上接近隐形。
+  if(uSkin==1) mark = 0.0;
   vec3 markC = (uSkin==1) ? vec3(0.98,0.97,0.99) : ((uSkin==2)? vec3(0.72,0.74,0.85) : vec3(0.045,0.02,0.05));
   base = mix(base, markC, mark*0.95);
 
   /* ---- 面罩：大白眼 ---- */
   float faceMask = 0.0;
   float hoodDbg = 0.0;      // 帽体覆盖，仅给 uDebug==2 的几何探针用
+  float headDbg = 0.0;      // 头颈区（headZone）覆盖，仅给 uDebug==5 用。
+                            // 有了它才能算「兜帽/头部」这个跟参考图可比的面积比
+                            // （拿 hood/suit 比是错的：suit 是全身，分母大一个数量级）。
+  float eyeDbg  = 0.0;      // 眼白覆盖，仅给 uDebug==3 的几何探针用
   if(uEyeL.w > 0.0){
     vec2 eL = vec2(uEyeL.x*aspect, uEyeL.y), eR = vec2(uEyeR.x*aspect, uEyeR.y);
     vec2 axis = eR - eL;
@@ -720,30 +820,95 @@ void main(){
     base = mix(base, mix(hot, lineC, (1.0-cell)*0.4), faceMask*0.55);
 
     float sz = span * uEyeSize;
-    vec2 qe = q - vec2(0.0, span*0.06);                // 面罩眼位比真人眼略高
-    vec2 qL = qe + vec2(span*0.56, 0.0); qL.x = -qL.x; // 左眼镜像使 +x 指向外侧
-    vec2 qR = qe - vec2(span*0.56, 0.0);
-    float dL = eyeShape(qL, sz), dR = eyeShape(qR, sz);
+    // 格温的眼罩比经典略大，但**必须整个留在脸轮廓内**。
+    // 叠加实测（把 uDebug==3 的几何轮廓描红叠到成品上）教训：
+    // eyeGap=0.58 + gwSz=1.05 + 水滴半宽 W=0.56 时眼罩总宽超过头宽，
+    // 两只眼的外角伸到脸外被 mask 裁掉，屏幕上只剩内侧一小段 + 落在脸中央的洋红描边，
+    // 看起来像"眼罩消失了" —— 而单看几何探针（10052 像素）和亮度（白 63%）都是正常的。
+    // 这类"几何对、亮度对、但被裁掉"的问题只能靠几何轮廓叠加原图才看得出来。
+    //
+    // eyeGap=0.46 是 eyeShapeGwen 里 A/B 拟合值的**前提**（参考图两眼中心距 = 0.92*span），
+    // 改这个数就必须回头改 A/B，否则形状比例会跟参考图脱钩。
+    // eyeGap 与 eyeShapeGwen 里的 A/B 是**一套**参数（同乘 0.879 从参考图比例收下来的），
+    // 改其中任何一个都要按同一系数改另一个，否则眼形长宽比就跟参考图脱钩了。
+    float eyeGap = (uSkin==1) ? 0.4042 : 0.56;
+    // 格温走拟合出来的绝对尺寸（A/B 已含比例），不再额外缩放；经典保持原样
+    float gwSz   = (uSkin==1) ? span : sz;
+    vec2 qe = q - vec2(0.0, span*((uSkin==1)? 0.02 : 0.06));  // 格温眼位更靠脸中线
+    vec2 qL = qe + vec2(span*eyeGap, 0.0); qL.x = -qL.x; // 左眼镜像使 +x 指向外侧
+    vec2 qR = qe - vec2(span*eyeGap, 0.0);
+    float dL, dR;
+    if(uSkin==1){
+      dL = eyeShapeGwen(qL, gwSz); dR = eyeShapeGwen(qR, gwSz);
+    }else{
+      dL = eyeShape(qL, gwSz);     dR = eyeShape(qR, gwSz);
+    }
     float d = min(dL, dR);
+    /* 格温的鼻梁分隔：**不需要**显式挖楔子。
+       Python 里对两只 -52 度倾斜超椭圆做过覆盖统计：eyeGap=0.46 时两眼重叠像素 = 0，
+       天然间隙（span 单位）从上到下 0.658 -> 0.361，参考图实测是 0.988 -> 0.313 ——
+       走向一致、量级接近。倾斜椭圆的内侧端本来就是斜着分开的。
+       前两版加了 d = max(d, bridgeW - |qe.x|) 的竖直硬切，结果把倾斜椭圆的内尖
+       切成方头（v2 甚至把整个内半边吃掉）。这类"两个形状本来就不相交"的场合，
+       先量重叠再决定要不要加分隔，不要凭"看起来会糊"就加一刀。 */
     float inEye  = 1.0 - smoothstep(0.0, span*0.016, d);
-    // 电影版眼框是两层：贴镜片的黑线 + 外圈金属斜面（ref/movie/1.jpg）
-    float border = (1.0 - smoothstep(span*0.075, span*0.125, d)) * (1.0 - inEye);
-    float bevel  = (1.0 - smoothstep(span*0.125, span*0.185, d))
-                 * (1.0 - smoothstep(-span*0.02, span*0.075, -d)) * (1.0 - border) * (1.0 - inEye);
+    eyeDbg = inEye;
+    // 经典/共生体：贴镜片的黑线 + 外圈金属斜面（ref/movie/1.jpg）
+    // 格温：贴白眼的亮洋红边 + 外面一圈深紫红（漫画分色是两层色块，不是金属）。
+    // 宽度是**量出来的**，不是估的：把参考图眼白连通域做距离变换，只统计紧贴眼白的
+    // 那条洋红连通带，实测带宽 p95 = 19px。参考图 headSpan=316、两眼中心距 sep=135，
+    // 所以 19px = 0.141*sep = 0.129*span。
+    // 上一版给到 0.085~0.34 span（≈2.6 倍过宽），眼白被挤成一条缝、整只眼读成洋红肉块 ——
+    // 这是「描边越粗越好读」这个直觉的反例：粗到盖过眼白，反而丢掉了形状。
+    float bw0 = (uSkin==1) ? 0.012 : 0.075;   // 内层描边起点（贴着眼白）
+    float bw1 = (uSkin==1) ? 0.130 : 0.125;   // 内层洋红带外缘（实测 0.129）
+    float bw2 = (uSkin==1) ? 0.185 : 0.185;   // 外层深紫红，再窄一圈收口
+    float border = (1.0 - smoothstep(span*bw0, span*bw1, d)) * (1.0 - inEye);
+    float bevel  = (1.0 - smoothstep(span*bw1, span*bw2, d))
+                 * (1.0 - smoothstep(-span*0.02, span*bw0, -d)) * (1.0 - border) * (1.0 - inEye);
 
     // 镜面白眼：上亮下暗 + 高光点 + 细蜂窝纹（电影镜片是穿孔网眼材质）
     float gy = clamp(0.5 - qe.y/(span*0.55), 0.0, 1.0);
     vec3 lens = mix(eyeC*0.42, eyeC*1.16, gy);
     float mesh = 0.5 + 0.5*sin(qe.x/span*230.0)*sin(qe.y/span*230.0);
     lens *= 0.955 + 0.045*mesh;
-    float spec = exp(-pow(length((qR - vec2(-sz*0.16, -sz*0.13))/(sz*0.17)),2.0))
-               + exp(-pow(length((qL - vec2(-sz*0.16, -sz*0.13))/(sz*0.17)),2.0));
+    float spec = exp(-pow(length((qR - vec2(-gwSz*0.16, -gwSz*0.13))/(gwSz*0.17)),2.0))
+               + exp(-pow(length((qL - vec2(-gwSz*0.16, -gwSz*0.13))/(gwSz*0.17)),2.0));
     lens += spec*0.85;
-    lens += (uSkin==1 ? vec3(0.88,0.14,0.45) : vec3(0.10,0.14,0.32)) * (1.0-gy)*0.85;
+    // 格温的眼白几乎是纯白（漫画平涂），只在下缘压一点洋红反光
+    lens += (uSkin==1 ? vec3(0.88,0.14,0.45) : vec3(0.10,0.14,0.32)) * (1.0-gy)*(uSkin==1 ? 0.30 : 0.85);
+    if(uSkin==1) lens = mix(lens, vec3(1.0), 0.62);   // 格温眼白是漫画平涂的纯白
 
-    base = mix(base, vec3(0.02,0.015,0.03), border*0.95);
-    base = mix(base, vec3(0.55,0.57,0.62)*(0.7+0.6*gy), bevel*0.80);  // 金属斜面沿光变化
+    vec3 borderC = (uSkin==1) ? vec3(0.93,0.13,0.52) : vec3(0.02,0.015,0.03);
+    vec3 bevelC  = (uSkin==1) ? vec3(0.52,0.07,0.34) : vec3(0.55,0.57,0.62)*(0.7+0.6*gy);
+    base = mix(base, borderC, border*0.95);
+    base = mix(base, bevelC,  bevel*(uSkin==1 ? 0.92 : 0.80));
     base = mix(base, lens, inEye*0.97);
+
+    /* ---- 格温面罩下半：蜂窝穿孔区 ----
+       参考 ref/vecdetail/gwen_c.png：鼻梁以下是一整片白布 + 密集小六角孔，
+       边界是一条向下凸的弧（不是水平直线），两侧收进脸轮廓内。
+       这块是格温面罩「有材质感」的关键 —— 只铺一层细网格读起来像纱窗，不像穿孔板。 */
+    if(uSkin==1){
+      // 区域：眼罩下方、脸轮廓内。上缘是向下凸的弧
+      float archY = span*0.30 + span*0.16*(1.0 - smoothstep(0.0, span*0.85, abs(q.x)));
+      float lowZone = smoothstep(archY, archY + span*0.10, q.y)          // 弧线以下
+                    * (1.0 - smoothstep(span*1.30, span*1.62, q.y))      // 下巴以上
+                    * (1.0 - smoothstep(span*0.72, span*0.96, abs(q.x))) // 收在脸内
+                    * faceMask * body;                                   // ★ 乘 body：不许漏到人体轮廓外
+      // 六角孔阵列：借 hexGrid 的格内坐标做圆孔（.xy = 到格心的偏移）
+      vec4 hx = hexGrid(q / (span*0.052));
+      float holeR = length(hx.xy);
+      float perf  = 1.0 - smoothstep(0.24, 0.40, holeR);   // 孔（暗）
+      // 白底
+      base = mix(base, vec3(0.97,0.96,0.99), lowZone*0.92);
+      // 孔：压暗 + 一点冷调，读作穿孔而不是纹理
+      base = mix(base, vec3(0.62,0.60,0.68), perf*lowZone*0.55);
+      // 区域上缘的洋红细描边（参考图里弧线是有色的）
+      float archEdge = (1.0 - smoothstep(0.0, span*0.030, abs(q.y - archY)))
+                     * (1.0 - smoothstep(span*0.72, span*0.96, abs(q.x))) * faceMask * body;
+      base = mix(base, vec3(0.93,0.20,0.56), archEdge*0.70);
+    }
 
     /* ---- 格温兜帽（hood）----
        参照 Into the Spider-Verse：白色连帽卫衣的帽子罩住整个头，
@@ -754,39 +919,92 @@ void main(){
        视觉上就是帽子罩住头、露出中间面罩，这是这套输入能做到的最接近参考图的读法。
        第一版按参考图外扩（2.05×2.30 span）画，结果全被 mask 裁掉，头上什么都没多出来。 */
     if(uSkin==1 && uHood > 0.01){
-      // 帽口：露脸的洞。比面罩略小，下缘收窄成尖角（格温帽口的标志形状）
+      /* 帽口形状：**上方是一个尖顶拱**，不是椭圆。
+         实测依据 —— 把参考图的紫罗兰内衬带抠出来逐行量跨度：
+           y=120 宽 1px（尖顶）  y=132 宽 43  y=144 宽 75  y=156 宽 105  y=168 宽 131
+         宽度随纵深**线性**增长（dx/dy = 1.365，半角 53.8 度），这是标准的尖拱，
+         椭圆是做不出这种"顶上一个尖 + 两条直边"的读法的。
+         尖顶位置：在眼中心上方 0.886*span、几乎正对中线。
+         老版用 length(fq/vec2(...)) 的椭圆洞，顶上是圆的，读起来像浴帽不像兜帽。 */
       vec2 fq = q - vec2(0.0, span*0.02);
-      float taper = mix(1.0, 0.60, smoothstep(0.0, span*1.25, fq.y));  // 下方收窄 -> 尖角
-      // 帽口收小到只露"面罩正脸"，头顶/两颊的白布才够宽、读得出是帽子
-      // 帽口必须明显小于头部 mask，否则帽体（= mask 内、帽口外那一圈）算出来
-      // 几乎是空集。纯绿探针实测：0.86×1.16 的帽口只留下 3% 帽体，等于没画。
-      // 收到 0.62×0.86 后帽体才有足够宽度读作"帽子罩住头"。
-      float hole = length(fq / vec2(span*0.74*taper, span*1.00));
+      /* 尖拱：以尖顶为原点，帽口边界 = 「离中线的距离 < 斜率*纵深」。
+         参数是在 numpy 里复刻本判据、以**两个**指标同时扫出来的：
+           ① hood ∩ eye（帽体压到眼白的比例）必须 < 2%
+           ② hood/head 面积比尽量靠近参考图实测值
+         最终 apex=1.45 slope=0.45 close=0.55 -> hood/head=0.213、遮眼 1.8%。
+
+         ★ 为什么面积比只做到 0.21 而不是参考图的 0.401：
+         参考图的兜帽有一大块布**长在头部轮廓之外**（帽子是鼓起来包住头的），
+         而我们只有人体 alpha mask，轮廓外的像素一律被切掉 —— 这块布画不出来。
+         所以 0.21 是这套输入的上限，硬把面积比推到 0.40 的唯一办法是让帽体
+         往内侵占脸部，那就会压住眼罩（上一版实测压掉 45% 眼白）。
+         两个指标冲突时以"部件不互相遮挡"为先，面积比只作参考。
+
+         ★ 斜率不能照抄参考图量到的 1.365：那是在它自己的头宽下量的
+         （head 349px / span 147px），我们这套假 mask 更瘦（203px / 92px）。
+         直接搬绝对斜率会把帽口开得过大，实测 hood/head 只剩 0.058。
+         教训：从参考图搬**角度/斜率**必须按两边头宽重新标定，
+         只有面积比、长宽比这类无量纲量才能直接搬。 */
+      float apexY = -span*1.45;                        // q.y 向下为正，尖顶在眼上方
+      float dyA   = fq.y - apexY;                      // 尖顶往下的纵深（>0）
+      float archHalf = span*0.055 + 0.45 * max(dyA, 0.0);   // 线性张开，尖顶留一点圆角
+      // 下半收口（帽口在下颌处闭合），否则帽体在脸下侧断开
+      float closeT = smoothstep(span*0.55, span*1.35, fq.y);
+      archHalf *= (1.0 - 0.55*closeT);
+      // 横向余量：<1 在帽口内（露脸）
+      float holeX = abs(fq.x) / max(archHalf, 1e-4);
+      /* ★ 必须再乘一个纵向项。尖拱只约束了横向，往下无界 ——
+         探针实测（uDebug==2 纯绿）：只用 holeX 时 hood 铺到 y=406、横跨 x[228..871]，
+         整个肩膀和上胸都算成帽子（hood/suit = 0.192），画面上帽体反而"消失"了
+         （因为它不再是贴着头的一圈，而是一大片和身体同色的白）。
+         老版椭圆 length(fq/vec2(w,h)) 在两个轴上同时增长，隐含了这个边界，换成
+         尖拱以后这个隐含约束就丢了。教训：把"两轴归一化"换成"单轴判据"时，
+         要显式补回另一轴的边界。 */
+      float holeY = abs(fq.y + span*0.10) / (span*1.18);
+      float hole  = max(holeX, holeY);
+      // 上方超过尖顶的区域一律算帽体（否则尖顶正上方 dyA<0 会算成洞内）
+      hole = max(hole, smoothstep(span*0.02, -span*0.10, dyA) * 2.0);
       // 帽体 = 面罩区域内、帽口之外的那一圈（贴着头轮廓的宽边）
       float inHole = smoothstep(0.94, 1.06, hole);        // 1 = 在洞外（帽体上）
       // 帽体范围用 body（真实人体 alpha）而不是 faceMask：
       // faceMask 是「略大于脸」的椭圆，帽体只能占它边缘一窄条，读不出是帽子。
       // body 是人体轮廓，头顶/两侧的布料都能铺到。
-      float headZone = body * (1.0 - smoothstep(span*2.4, span*3.6, q.y));  // 限制在头颈附近
+      //
+      // ★ 纵向截断位置是量出来的，不是估的。用 uDebug==7（suit）探针读 body 的纵向剖面：
+      //   眼中心 y=132；头顶 y=72（眼上方 0.65*span）；**脖子最窄处 y=240（眼下方 1.17*span）**，
+      //   再往下 w 从 81 直接跳到 389 —— 那是肩膀。
+      // 旧值 smoothstep(2.4, 3.6) 把截断放到了脖子下方两倍远的地方，
+      // 帽体一路铺满肩和上胸（探针实测 hood 铺到 y=406、横跨 x[228..871]，hood/suit=0.19~0.45），
+      // 画面上帽子反而"消失"了 —— 因为它不再是贴着头的一圈白边，而是一大片和身体同色的白。
+      float headZone = body * (1.0 - smoothstep(span*1.05, span*1.28, q.y));  // 收在脖子处
+      headDbg = headZone;
       float hood = headZone * inHole * uHood;
       hoodDbg = hood;
-      // 帽沿：紧贴帽口内侧的一条厚边，内衬洋红蛛网从这里露出来
-      float lip = headZone * smoothstep(0.90, 1.02, hole)
-                * (1.0 - smoothstep(1.04, 1.30, hole)) * uHood;
+      /* 帽沿内衬：参考图里只是**贴着帽口内侧的一条细边**。
+         旧范围 hole 0.90~1.30 太宽（帽体本身 0.94 起算），紫内衬会糊住整个头顶、
+         压过眼罩上缘。收到 0.94~1.10 才读作"帽子的内里露出来一条"。
+
+         ★ 还必须做**纵向门控**：内衬只长在尖拱的上半段。
+         参考图实测内衬带只存在于 y=120..181（眼中心 y=250 的上方），
+         也就是只在眼睛**以上**；换成尖拱以后 hole≈1 是沿整条帽口的细带，
+         不加门控的话内衬会顺着两条斜边一路划过眼罩，
+         渲染出来是一个横穿双眼的紫色三角框，眼白被压掉（实测踩过）。 */
+      float lipZone = 1.0 - smoothstep(-span*0.34, span*0.10, q.y);   // 只在眼上方
+      float lip = headZone * lipZone * smoothstep(0.94, 1.00, hole)
+                * (1.0 - smoothstep(1.02, 1.10, hole)) * uHood;
       // 帽体本体：白布，带体积明暗（顶部亮、贴脸侧暗）+ 布料纤维
       float hshade = mix(0.70, 1.08, clamp(0.5 - q.y/(span*2.6), 0.0, 1.0));
       vec3 hoodC = hot * hshade * (0.94 + 0.10*fbm(q/span*6.0));
-      // 内衬蛛网：以帽口为中心的径向 + 同心，用 line 色（洋红）
-      float hAng = atan(fq.y, fq.x), hRad = length(fq)/span;
-      float hRa = abs(fract(hAng/TAU*9.0 + 0.5) - 0.5)*2.0;
-      float hRadial = 1.0 - smoothstep(0.055, 0.115, hRa);
-      float hRing = 1.0 - smoothstep(0.05, 0.10, abs(fract(hRad*3.1)-0.5)*2.0);
-      float hWeb = clamp(max(hRadial, hRing*0.9), 0.0, 1.0);
-      vec3 liningC = mix(lineC*0.45, lineC, 0.45+0.55*hWeb);   // 内衬底色偏暗，网线亮
+      // 内衬：参考 ref/vecdetail/gwen_full.png —— 帽口内侧是一条**紫罗兰渐变带**，
+      // 不是洋红蛛网。旧版画蛛网在这么窄的一圈里读作噪点，而且颜色也不对。
+      // 沿帽口法向做渐变：贴帽口一侧亮紫、往帽体一侧转深紫。
+      float liningT = clamp((hole - 0.90) / 0.40, 0.0, 1.0);
+      vec3 liningC = mix(vec3(0.72,0.56,0.92), vec3(0.34,0.20,0.52), liningT);
       base = mix(base, hoodC, hood*0.96);
       base = mix(base, liningC, lip*0.90);
-      // 帽檐在面罩上压出的阴影，制造前后关系
-      float hoodShadow = headZone * (1.0 - smoothstep(0.62, 0.94, hole))
+      // 帽檐在面罩上压出的阴影，制造前后关系。
+      // 同样只在眼上方（理由同 lipZone：尖拱的斜边会横穿眼罩，不门控就把眼白压暗）
+      float hoodShadow = headZone * lipZone * (1.0 - smoothstep(0.62, 0.94, hole))
                        * smoothstep(0.40, 0.80, hole) * uHood;
       base *= 1.0 - hoodShadow*0.30;
     }
@@ -796,14 +1014,51 @@ void main(){
     faceMask = hv * smoothstep(0.24, 0.14, abs(uuC));
   }
 
+  /* ---- 格温的 V 形领口 ----
+     参考图：白色高领，两条洋红斜条从颈侧向下汇聚成一个 V，V 尖在胸骨位置。
+     用躯干坐标画：|uuC| 是离躯干中线的距离，vv 是纵向。
+     斜条 = 「到某条斜线的距离足够小」的一条带。
+
+     ★ 必须排除脸部区域：uuC/vv 在脸上也有值，不加门控的话两条斜条会画到脸上，
+     实测直接把眼罩压成两条粉线（眼罩本体几乎全被覆盖）。 */
+  if(uSkin==1){
+    // 斜线：从颈侧 (|uuC|=0.30, vv=0.17) 走到中线 (|uuC|=0.02, vv=0.34)
+    float ax = abs(uuC);
+    float t  = clamp((0.34 - vv) / 0.17, 0.0, 1.0);      // 1=领口高度, 0=V 尖高度
+    float lineX = mix(0.02, 0.30, t);                      // 该高度上斜条应在的横向位置
+    float bandW = 0.030;
+    float vBand = (1.0 - smoothstep(bandW, bandW*2.1, abs(ax - lineX)))
+                * smoothstep(0.145, 0.175, vv)             // 领口以下才有
+                * (1.0 - smoothstep(0.345, 0.375, vv));    // V 尖以上
+    // 领口内侧的白色高领（V 之内那块要保持白，不能被黑胸腹吃掉）
+    float collarIn = (1.0 - smoothstep(0.0, 0.045, ax - lineX))
+                   * smoothstep(0.135, 0.165, vv)
+                   * (1.0 - smoothstep(0.330, 0.370, vv));
+    // 脸部门控：faceMask>0 的地方一律不画领口
+    float notFace = 1.0 - clamp(faceMask*1.6, 0.0, 1.0);
+    base = mix(base, vec3(0.97,0.96,0.99), collarIn*0.90*notFace);
+    base = mix(base, vec3(0.95,0.12,0.52), vBand*0.92*notFace);
+  }
+
+
   /* ---- 光照 / 反光 / 边光 ---- */
   vec3 L = normalize(vec3(-0.45, -0.62, 0.72));
   float lam = clamp(dot(N, L), 0.0, 1.0);
   float ndv = clamp(N.z, 0.0, 1.0);
   float fres = pow(1.0 - ndv, 3.2);
   vec3 envCol = texture(uCam, clamp(sv + N.xy*0.16, vec2(0.001), vec2(0.999))).rgb;
-  float ambBoost = (uSkin==1) ? 0.16 : 0.0;    // 格温白布在背光侧不能掉成灰
-  vec3 shade = base * (0.52 + ambBoost + 0.72*lam);
+  // 格温白布在背光侧不能掉成灰，所以给它加环境项。但**粉块不能吃这一项**：
+  // 归因实测（探针 mask 内取样，不是估个矩形 ROI）关掉 ambBoost 后粉块内
+  // 白判定从 41.7% 掉到 4.9%（Δ=37），粉判定几乎不变 —— 它是粉块发白的主凶。
+  float ambBoost = (uSkin==1) ? 0.16 * (1.0 - pinkDbg*0.95) : 0.0;
+  // 漫画平涂的粉块不该吃强方向光。当时用「着色链逐阶段快照」探针实测（按行分 5 段）：
+  //   粉块刚写完 base 三段粉判定都是 100%
+  //   过完 shade = base*(0.52+amb+0.72*lam) 后掉到 91.7% / 32.4% / 35%
+  //   过完 col = mix(bgCol, shade, suit) 再掉到 83.2% / 18.4% / 2.2%
+  // 即两处损失：lam 压暗（中上段）+ suit 稀释（最上段 suit 只有 167/255）。
+  // 所以给粉块把 lambert 抬到接近常数（cel 平涂），不然侧面永远读成灰粉。
+  float lamFlat = mix(lam, 0.86, pinkDbg*0.90);
+  vec3 shade = base * (0.52 + ambBoost + 0.72*lamFlat);
   shade += envCol * fres * uGloss * 0.85;                     // 环境反射（湿感）
   float spec2 = pow(clamp(dot(reflect(-L, N), vec3(0,0,1)), 0.0, 1.0), 34.0);
   shade += vec3(1.0) * spec2 * (0.35 + uGloss*0.5);
@@ -838,7 +1093,11 @@ void main(){
   vec3 bgCol = mix(bgSrc, city, bgAmt);
 
   /* ---- 合成 ---- */
-  vec3 col = mix(bgCol, shade, suit);
+  // 粉块区把 suit 抬到接近满值：探针实测粉块最上段 suit 只有 167/255，
+  // mix(bgCol, shade, suit) 会用背景把它稀释掉（粉判定 35% -> 2.2%）。
+  // 战衣其它部位仍走原来的 suit（保留边缘的自然过渡）。
+  float suitC = mix(suit, max(suit, 0.96), pinkDbg*0.95);
+  vec3 col = mix(bgCol, shade, suitC);
 
   // 传送窗边框：色散 + 霓虹 + marching-ants 虚线 + 呼吸角点
   // （虚线/角点样式移植自 finger-frame-effect 的 drawOutline）
@@ -877,6 +1136,25 @@ void main(){
   // 于是回退帽口尺寸的破坏对照读不出差异（实测 0.301 vs 0.268，断言等于永真）。
   if(uDebug==2){
     outColor = vec4(0.0, hoodDbg, 0.0, 1.0);
+    return;
+  }
+  // uDebug==3：眼罩几何探针。眼白覆盖输出成纯绿，用来量「眼罩到底是什么形状」——
+  // 数画面像素会被 faceMask 底色、洋红描边、布料高光干扰，读不出真实轮廓。
+  if(uDebug==3){
+    outColor = vec4(0.0, eyeDbg, 0.0, 1.0);
+    return;
+  }
+  // uDebug==4：格温粉块几何探针。粉块覆盖输出成纯绿 —— 数画面粉像素会被
+  // 洋红眼罩描边、边光、夜景背景一起算进去，读不出粉块本身多大。
+  if(uDebug==4){
+    outColor = vec4(0.0, pinkDbg, 0.0, 1.0);
+    return;
+  }
+  // uDebug==7：suit（战衣显现程度）探针。粉块几何满值却在成品里没色时，
+  // 元凶通常是最终合成 col = mix(bgCol, shade, suit) 里 suit 偏低把战衣稀释掉。
+  if(uDebug==5){ outColor = vec4(0.0, headDbg, 0.0, 1.0); return; }  // 头颈区（兜帽面积比的分母）
+  if(uDebug==7){
+    outColor = vec4(0.0, suit, 0.0, 1.0);
     return;
   }
   if(uDebug==1){
@@ -1792,6 +2070,21 @@ window.__SUITUP_TEST__ = function(){
 /* 几何探针钩子：uDebug==2 把帽体覆盖输出成纯绿，用来量「帽子实际多大」。 */
 window.__HOOD_PROBE__ = function(on){
   S.debugMode = on ? 2 : null;
+  return S.debugMode;
+};
+/* 几何探针钩子：uDebug==3 把眼白覆盖输出成纯绿，用来量眼罩真实轮廓形状。 */
+window.__EYE_PROBE__ = function(on){
+  S.debugMode = on ? 3 : null;
+  return S.debugMode;
+};
+/* 几何探针钩子：uDebug==4 把格温粉块覆盖输出成纯绿。 */
+window.__PINK_PROBE__ = function(on){
+  S.debugMode = on ? 4 : null;
+  return S.debugMode;
+};
+/* 通用探针钩子：直接设任意 uDebug 值（null = 关闭）。调参/归因用。 */
+window.__DBG_MODE__ = function(v){
+  S.debugMode = (v === null || v === undefined) ? null : (v|0);
   return S.debugMode;
 };
 /* 脸部特写测试钩子：注入一个「脸占满画面」的 mask（半身像 vs 大头照的区别）。

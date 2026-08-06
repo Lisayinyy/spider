@@ -706,8 +706,12 @@ def main():
         # 参照 Into the Spider-Verse 海报：白兜帽 + 洋红蛛网 + 黑胸腹上的白蜘蛛
         # + 青绿芭蕾鞋 + 大月亮粉紫夜城。
         srcO = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
-        check("有兜帽实现（uHood + 帽口 taper 尖角）",
-              "uniform float uHood" in srcO and "taper" in srcO and "liningC" in srcO)
+        # 帽口从"椭圆洞 + taper"改成了**尖顶拱**（按参考图内衬带逐行跨度拟合：
+        # 宽度随纵深线性增长 = 尖拱，椭圆做不出"顶上一个尖 + 两条直边"）。
+        # 所以这里断言的是尖拱实现（archHalf + apexY），不再是 taper。
+        check("有兜帽实现（uHood + 尖顶拱帽口 + 内衬）",
+              "uniform float uHood" in srcO and "archHalf" in srcO
+              and "apexY" in srcO and "liningC" in srcO)
         check("格温蛛网是洋红不是紫（web 的 r 远大于 b）",
               "web=vec3(0.95,0.20,0.52)" in srcO.replace(" ", ""))
         check("格温蛛徽是白色（压在黑胸腹上）",
@@ -783,9 +787,14 @@ def main():
           const W = c.width, H = c.height;
           // 手臂区域（画布坐标，避开躯干中线和背景）：左右各取一块
           // 框要小：swiftshader 下 readPixels 很慢，两块 150x110 会让整跑超时。
-          const boxes = [[0.18*W, 0.44*H, 46, 40],
-                         [0.74*W, 0.44*H, 46, 40]];
-          let pink = 0, tot = 0;
+          /* ROI 位置必须跟着美术改动重新定位。
+             形状精修把粉块从"腋下/侧腰一大片"收到了外侧（内边界 torsoU 0.50 -> 0.80），
+             旧的 0.18W/0.74W 两块正好落在**新的粉块**上，于是"开/关网线"几乎读不出差异
+             （实测 0.5111 vs 0.5109），断言失去意义 —— 不是产品坏了，是探针没跟着搬。
+             用 8x6 网格扫了一遍粉/白分布重新定位：粉块在列 2 和列 5、行 2~3。 */
+          const boxes = [[0.27*W, 0.36*H, 46, 40],
+                         [0.65*W, 0.36*H, 46, 40]];
+          let pink = 0, line = 0, tot = 0;
           for(const [bx,by,bw,bh] of boxes){
             const w = Math.round(bw), h = Math.round(bh);
             const buf = new Uint8Array(4*w*h);
@@ -796,9 +805,17 @@ def main():
               if(r+gg+b < 90) continue;            // 跳过背景暗部
               tot++;
               if(r - gg > 18 && r > 90) pink++;
+              /* 白网线：洋红底上被 mix 到偏白，判据只能是「绿通道抬起」。
+                 阈值必须用两端实测数据定，不能凭"混白了应该很亮"猜：
+                 实测 ROI 内 mean g 网开 64.6 / 网关 54.9，g90 分别是 85 / 55。
+                 网线像素落在 g≈70~90，第一版写 gg>96 直接漏掉全部网线
+                 （line 计数两端都是 152，纯永真）。取 g>68 卡在两端之间。 */
+              if(gg > 68) line++;
             }
           }
-          return {pink, tot, ratio: tot ? +(pink/tot).toFixed(4) : 0};
+          return {pink, line, tot,
+                  ratio: tot ? +(pink/tot).toFixed(4) : 0,
+                  lineRatio: tot ? +(line/tot).toFixed(4) : 0};
         }"""
         skin(1)
         page8.wait_for_timeout(400)
@@ -811,9 +828,23 @@ def main():
         # 不锁"粉占比 > X%" —— 那会把一个错的美术目标钉死。参考图里格温手臂
         # 是**白布为主、洋红只是细网线**；实测把粉压到 8%（白 33%）才对味，
         # 而旧断言要求 >70%，正好锁住"整条粉袖子"那个错版本。
-        # 正确语义只有一条：网开 vs 网关，粉像素必须显著变化。
-        check("格温手臂真的铺了洋红网（开/关网线粉像素显著变化）",
-              roiOn["ratio"] > roiOff["ratio"] + 0.12, (roiOn, roiOff))
+        #
+        # 这里要测的是「网线」，就必须只让网线随开关变化。曾经 dGate 乘在
+        # 粉底/自发光/描边上（整块粉都被门控），于是 webDens=0 时粉块整体消失，
+        # 「粉像素占比」两端只差 0.069 —— 因为它测的是"粉块存在"而不是"网存在"，
+        # 两个都在或都不在，永远读不出网线。修法是把 dGate 收窄到白网线那一行。
+        # 现在改用**网线像素占比**做判据，阈值取两端实测中间：
+        #   网开 lineRatio = 0.1655 / 网关 = 0.0443（差 3.7 倍）
+        check("格温手臂真的铺了洋红网（开/关网线白像素显著变化）",
+              roiOn["lineRatio"] > roiOff["lineRatio"] + 0.06, (roiOn, roiOff))
+        # 粉块本身不受网密度影响（dGate 只管网线）——反过来验证门控粒度对了。
+        # 阈值 0.03 是两端实测定的：粒度正确时 Δ=0.003，把 dGate 乘回粉底
+        # （复现旧 bug）时 Δ=0.072。注意只乘回一行还不够——自发光那行
+        # (pinkC*1.18) 独立撑着粉块，实测只掉 0.6128->0.6005，三行都乘回去
+        # 才真的掉到 0.5408。破坏对照要照旧 bug 的原样复现，不能只改一处。
+        check("粉块存在且不随网密度开关消失（dGate 粒度只管网线）",
+              roiOff["ratio"] > 0.30 and abs(roiOn["ratio"] - roiOff["ratio"]) < 0.03,
+              (roiOn, roiOff))
         # 守住美术目标：参考图里格温是**白衣**，洋红只是网线。
         # 归因实测（纯绿探针）这层网覆盖手臂约 30%，光靠收线宽压不下来，
         # 是靠降混合 alpha 到 0.42 + 白布提亮才把白粉比翻正的（粉 28%→8%）。
@@ -824,8 +855,10 @@ def main():
         ARM_WHITE_JS = """() => {
           const cv = document.querySelector('canvas');
           const g = cv.getContext('webgl2');
-          const x0 = Math.floor(cv.width*0.18), x1 = Math.floor(cv.width*0.34);
-          const y0 = Math.floor(cv.height*0.38), y1 = Math.floor(cv.height*0.62);
+          /* 同上：这块 ROI 要落在**纯白袖子**上，不能落在粉块上。
+             8x6 网格实测白袖子在列 1（x 0.12~0.25）、行 3（y 0.50~0.67）。 */
+          const x0 = Math.floor(cv.width*0.13), x1 = Math.floor(cv.width*0.24);
+          const y0 = Math.floor(cv.height*0.51), y1 = Math.floor(cv.height*0.66);
           const w = x1-x0, h = y1-y0;
           const buf = new Uint8Array(w*h*4);
           // WebGL readPixels 原点在左下，画面 y 要翻过来
@@ -846,32 +879,141 @@ def main():
         # 第一版写 1.3 太松，正好卡在两者之间 —— 破坏对照不报红，断言等于永真。
         check("格温手臂白布是主色（白像素 ≥ 2.4 倍粉像素）",
               armRatio["white"] > armRatio["pink"] * 2.4, armRatio)
-        # 兜帽必须有实体面积。用 uDebug==2 的**几何探针**（帽体覆盖输出成纯绿），
-        # 不去数画面白像素 —— 帽口一放大，露出的面罩本身也是浅色会被当成帽布，
-        # 那样写破坏对照读不出差异（实测 0.301 vs 0.268，断言等于永真）。
-        # 几何探针实测两端：帽口 0.74×1.00 → 18.7%（帽子读得出来）；
-        # 回退到旧的 0.86×1.16 → 11.6%（用户看到的"只有一圈粉边"）。
-        # 阈值取 0.15，卡在两者之间 —— 第一版写 0.10 太松，破坏对照不报红。
+        # 兜帽面积。用 uDebug==2（帽体，纯绿）做分子、uDebug==5（headZone 头颈区，纯绿）
+        # 做**分母** —— 旧版拿"整个 ROI 方框"当分母，框里大半是背景，比值没有物理意义，
+        # 而且帽口一放大、露出的浅色面罩会被当成帽布（破坏对照读不出差异，实测 0.301 vs 0.268）。
+        #
+        # 这条改成**双侧区间**，因为两个方向都会坏，而且坏法完全不同：
+        #   0.022  帽口开太大（slope 照抄参考图的 1.365）-> 帽体几乎没了，"兜帽消失"
+        #   0.240  当前值（apex 1.45 / slope 0.45）✓
+        #   0.810  headZone 放回 span*2.4~3.6 -> 帽体溢出到肩和上胸，糊成一大片白
+        # 三个值都是实测的，区间取 [0.10, 0.55] 卡在中间。
+        # 上限特别重要：旧断言只有下限，那个"溢出到躯干"的版本比值高达 0.81，
+        # 只写下限的话它照样是绿的 —— 而它正是把胸腹涂白、掩盖了 coreY 位置错误的元凶。
         HOOD_GEO_JS = """() => {
+          // 数**全画布**的纯绿像素。hood 和 headZone 用同一把尺子量，比值才有意义。
+          // 判据同时要求"绿高 + 红蓝低"：只判 g>128 会把亮背景算进来。
           const cv = document.querySelector('canvas');
-          const g = cv.getContext('webgl2');
-          const x0 = Math.floor(cv.width*0.38), x1 = Math.floor(cv.width*0.62);
-          const y0 = Math.floor(cv.height*0.06), y1 = Math.floor(cv.height*0.34);
-          const w = x1-x0, h = y1-y0;
-          const buf = new Uint8Array(w*h*4);
-          g.readPixels(x0, cv.height-y1, w, h, g.RGBA, g.UNSIGNED_BYTE, buf);
+          const w = cv.width, h = cv.height;
+          const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+          const cx = c2.getContext('2d'); cx.drawImage(cv, 0, 0);
+          const d = cx.getImageData(0, 0, w, h).data;
           let n = 0;
-          for(let i=0;i<w*h;i++) if(buf[i*4+1] > 128) n++;
-          return {hood: n, tot: w*h, ratio: +(n/(w*h)).toFixed(3)};
+          for(let i=0;i<w*h;i++){
+            if(d[i*4+1] > 120 && d[i*4] < 90 && d[i*4+2] < 90) n++;
+          }
+          return n;
         }"""
         page8.evaluate("() => window.__HOOD_PROBE__(true)")
         page8.wait_for_timeout(400)
-        hoodGeo = page8.evaluate(HOOD_GEO_JS)
+        hoodN = page8.evaluate(HOOD_GEO_JS)
+        page8.evaluate("() => window.__DBG_MODE__(5)")     # headZone = 头颈区（分母）
+        page8.wait_for_timeout(400)
+        headN = page8.evaluate(HOOD_GEO_JS)
+        page8.evaluate("() => window.__DBG_MODE__(null)")
+        page8.wait_for_timeout(300)
+        hoodGeo = {"hood": hoodN, "head": headN,
+                   "ratio": round(hoodN / headN, 3) if headN else 0}
+        print("   兜帽/头颈区 面积比:", hoodGeo)
+        check("兜帽面积在合理区间（0.10~0.55 帽体/头颈区）",
+              0.10 <= hoodGeo["ratio"] <= 0.55, hoodGeo)
+
+        # ---------------------------------------------------------------
+        print("\n== P. 格温形状：按参考图拟合的几何 ==")
+        # 这一段守的是「形状对不对」，不是「颜色亮不亮」。
+        # 所有目标值都是从 ref/vecdetail/gwen_full.png 量出来的，量法写在各条里。
+        srcP = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
+
+        # P1. 眼罩必须是**旋转超椭圆**。
+        # 依据：把参考图眼白连通域抠出来，对"旋转超椭圆"族做 IoU 网格搜索，
+        # 左眼 IoU=0.932 / 右眼 0.930（左右镜像一致）。
+        # 而之前的"中心线弯曲 + 变半厚"水滴模型只有 0.559，且拟合参数全顶在
+        # 搜索区间边界 —— 那是"模型族选错"的信号，不是"参数没调好"。
+        check("眼罩用旋转超椭圆（含倾角 + 拟合半轴）",
+              "ANG = -0.9076" in srcP and "const float A = 0.3295" in srcP)
+
+        # P2. 眼罩不能被兜帽压住。
+        # 这是上一版最严重的问题，而"hood/head 面积比"这个指标完全看不出来：
+        # 面积比 0.416 看着很健康，实测帽体却压掉了 **45% 的眼白**。
+        # 两个部件抢地方的冲突，只能靠量**部件之间的重叠**发现。
+        OVL_JS = """() => {
+          const cv = document.querySelector('canvas');
+          const w = cv.width, h = cv.height;
+          const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+          const cx = c2.getContext('2d'); cx.drawImage(cv, 0, 0);
+          const d = cx.getImageData(0, 0, w, h).data;
+          const out = new Uint8Array(w*h);
+          for(let i=0;i<w*h;i++){
+            if(d[i*4+1] > 120 && d[i*4] < 90 && d[i*4+2] < 90) out[i] = 1;
+          }
+          return Array.from(out);
+        }"""
+        page8.evaluate("() => window.__EYE_PROBE__(true)")
+        page8.wait_for_timeout(400)
+        eyeMask = page8.evaluate(OVL_JS)
+        page8.evaluate("() => window.__EYE_PROBE__(false)")
+        page8.evaluate("() => window.__HOOD_PROBE__(true)")
+        page8.wait_for_timeout(400)
+        hoodMask = page8.evaluate(OVL_JS)
         page8.evaluate("() => window.__HOOD_PROBE__(false)")
         page8.wait_for_timeout(300)
-        print("   兜帽几何覆盖:", hoodGeo)
-        check("兜帽有实体帽布面积（几何探针 ≥ 15% 头部窗口）",
-              hoodGeo["ratio"] > 0.15, hoodGeo)
+        eyeN = sum(eyeMask)
+        ovl = sum(1 for i in range(len(eyeMask)) if eyeMask[i] and hoodMask[i])
+        ovlPct = round(100.0 * ovl / eyeN, 2) if eyeN else 100.0
+        print("   眼白 n=%d, 被帽体覆盖 %d (%.2f%%)" % (eyeN, ovl, ovlPct))
+        # 实测两端：眼睛没缩小时 45.1%（画面上眼罩被帽子吃掉一半）；
+        # 把 A/B/eyeGap 同乘 0.879 收到参考图比例后 3.3%。阈值取 10%。
+        check("兜帽不压眼罩（眼白被帽体覆盖 < 10%）", ovlPct < 10.0,
+              {"eye": eyeN, "overlap": ovl, "pct": ovlPct})
+
+        # P3. 眼罩/头宽比例要跟参考图对齐。
+        # 参考图 眼区总宽/头宽 = 207/349 = 0.593。旧版 137/203 = 0.675（大了 14%），
+        # 正是这 14% 把兜帽的地方挤没了 —— 所以这条不是"美观偏好"，是硬约束。
+        page8.evaluate("() => window.__DBG_MODE__(5)")
+        page8.wait_for_timeout(400)
+        headMask = page8.evaluate(OVL_JS)
+        page8.evaluate("() => window.__DBG_MODE__(null)")
+        page8.wait_for_timeout(300)
+        CANVW = page8.evaluate("() => document.querySelector('canvas').width")
+
+        def bbox_w(mask, cw):
+            xs = [i % cw for i, v in enumerate(mask) if v]
+            return (max(xs) - min(xs)) if xs else 0
+
+        eyeW = bbox_w(eyeMask, CANVW)
+        headW = bbox_w(headMask, CANVW)
+        ratioW = round(eyeW / headW, 3) if headW else 0
+        print("   眼区总宽=%d 头宽=%d 比值=%.3f (参考 0.593)" % (eyeW, headW, ratioW))
+        check("眼罩/头宽比例接近参考图（0.52~0.66）",
+              0.52 <= ratioW <= 0.66, {"eyeW": eyeW, "headW": headW, "ratio": ratioW})
+
+        # P4. 粉块面积。参考图里把人物整体抠出来数亮洋红 = 7.3%。
+        # 旧参数实测 24.9%（超 3.4 倍）—— 屏幕上是两块巨大的粉色肩甲。
+        page8.evaluate("() => window.__PINK_PROBE__(true)")
+        page8.wait_for_timeout(400)
+        pinkN = page8.evaluate(HOOD_GEO_JS)
+        page8.evaluate("() => window.__PINK_PROBE__(false)")
+        page8.evaluate("() => window.__DBG_MODE__(7)")
+        page8.wait_for_timeout(400)
+        suitN = page8.evaluate(HOOD_GEO_JS)
+        page8.evaluate("() => window.__DBG_MODE__(null)")
+        page8.wait_for_timeout(300)
+        pinkRatio = round(pinkN / suitN, 4) if suitN else 0
+        print("   粉块/战衣 = %.4f (参考 0.073, 旧版 0.249)" % pinkRatio)
+        # 双侧区间：太大 = 粉肩甲；太小 = 粉块消失（之前乘 armAmt 时上段只剩 2.2%）。
+        check("粉块面积在合理区间（0.03~0.17 粉块/战衣）",
+              0.03 <= pinkRatio <= 0.17, {"pink": pinkN, "suit": suitN, "ratio": pinkRatio})
+
+        # P5. 胸腹必须是白的（参考图沿躯干中线扫描，白色一路到画面底部）。
+        # 旧的 coreY = smoothstep(0.16,0.26,vv) 从领口下方就转黑，跟参考图正好相反；
+        # 这个错之前被兜帽溢出的白布盖住了，headZone 修好才露出来。
+        check("胸腹白色（黑区下移到 vv 0.62 以下）",
+              "smoothstep(0.62, 0.74, vv)" in srcP)
+
+        # P6. 网格是正方格不是菱形（参考图放大实测网线沿身体横竖走向）。
+        check("粉块网格是正方格（不再旋转 45°）",
+              "vec2 dq = Bm * 16.0;" in srcP and "rot(0.785) * (Bm * 16.0)" not in srcP)
+
         check("格温测试页无 pageerror", not p8errs, p8errs[:2])
         page8.close()
 
