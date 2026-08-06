@@ -1,0 +1,1857 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>SUIT UP · 实时蜘蛛侠战衣 (WebGL + MediaPipe)</title>
+<style>
+  :root{
+    --ui-bg: rgba(10,12,20,.72);
+    --ui-line: rgba(255,255,255,.14);
+    --hot: #ff2c4b;
+    --cool: #2f7bff;
+    --neon: #b06bff;
+    --txt: #eef1f8;
+    --dim: #98a0b5;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#05060a;color:var(--txt);
+    font:13px/1.5 -apple-system,"PingFang SC","Helvetica Neue",Segoe UI,Roboto,sans-serif;
+    overflow:hidden}
+  #stage{position:fixed;inset:0;display:block;z-index:2}
+  canvas#gl{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+  /* ---------- 启动层（默认可见，不依赖 JS 显形） ---------- */
+  #boot{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(120% 90% at 50% 0%,#161a2b 0%,#05060a 62%);padding:24px}
+  #boot.hide{display:none}
+  .card{max-width:520px;width:100%;border:1px solid var(--ui-line);border-radius:18px;
+    background:linear-gradient(180deg,rgba(24,28,44,.9),rgba(10,12,20,.9));padding:26px 26px 22px;
+    box-shadow:0 30px 90px rgba(0,0,0,.6)}
+  .card h1{margin:0 0 4px;font-size:22px;letter-spacing:.02em}
+  .card h1 b{color:var(--hot)}
+  .card h1 i{color:var(--cool);font-style:normal}
+  .card p{margin:8px 0;color:var(--dim);font-size:13px}
+  .gestures{margin:14px 0 6px;display:grid;gap:8px}
+  .g{display:flex;gap:10px;align-items:flex-start;background:rgba(255,255,255,.04);
+    border:1px solid var(--ui-line);border-radius:10px;padding:9px 11px}
+  .g span:first-child{font-size:18px;line-height:1.1;filter:saturate(1.2)}
+  .g b{color:var(--txt);font-weight:600}
+  .g em{color:var(--dim);font-style:normal}
+  button.primary{margin-top:16px;width:100%;padding:13px 16px;border-radius:12px;cursor:pointer;
+    border:0;font-size:15px;font-weight:700;letter-spacing:.04em;color:#fff;
+    background:linear-gradient(100deg,var(--hot),#ff5a3c 45%,var(--cool));}
+  button.primary:active{transform:translateY(1px)}
+  .note{margin-top:12px;font-size:11.5px;color:#6f7789}
+  .note code{background:rgba(255,255,255,.07);padding:1px 5px;border-radius:4px;color:#c3cbdd}
+
+  /* ---------- 控制面板 ---------- */
+  #panel{position:fixed;top:12px;right:12px;z-index:30;width:246px;background:var(--ui-bg);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    border:1px solid var(--ui-line);border-radius:14px;padding:10px 12px 12px;
+    max-height:calc(100% - 24px);overflow:auto}
+  #panel.collapsed .body{display:none}
+  #panel header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;
+    user-select:none;font-weight:700;letter-spacing:.06em;font-size:12px}
+  #panel header .tg{color:var(--dim);font-weight:500}
+  .row{margin-top:9px}
+  .row label{display:flex;justify-content:space-between;font-size:11.5px;color:var(--dim);
+    margin-bottom:3px;letter-spacing:.02em}
+  .row label b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;height:18px;-webkit-appearance:none;background:transparent;margin:0}
+  input[type=range]::-webkit-slider-runnable-track{height:3px;border-radius:3px;
+    background:linear-gradient(90deg,var(--hot),var(--neon),var(--cool))}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
+    border-radius:50%;background:#fff;margin-top:-5.5px;box-shadow:0 1px 4px rgba(0,0,0,.6)}
+  .btns{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:11px}
+  .btns.f3{grid-template-columns:1fr 1fr 1fr}
+  .btns button{padding:7px 4px;font-size:11.5px;border-radius:8px;cursor:pointer;color:var(--txt);
+    border:1px solid var(--ui-line);background:rgba(255,255,255,.06)}
+  .btns button:hover{background:rgba(255,255,255,.12)}
+  .btns button.on{background:linear-gradient(100deg,rgba(255,44,75,.5),rgba(47,123,255,.5));
+    border-color:rgba(255,255,255,.3)}
+  .skins{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:11px}
+  .skins button{padding:8px 2px;border-radius:8px;font-size:11px;cursor:pointer;color:#fff;
+    border:1px solid var(--ui-line);background:rgba(255,255,255,.06)}
+  .skins button[data-k="0"].on{background:linear-gradient(160deg,#e01b3c,#1d4fd0);border-color:#fff6}
+  .skins button[data-k="1"].on{background:linear-gradient(160deg,#f2f4ff,#b06bff);color:#14162a;border-color:#fff9}
+  .skins button[data-k="2"].on{background:linear-gradient(160deg,#2a2a33,#0a0a0d);border-color:#fff6}
+  .sep{height:1px;background:var(--ui-line);margin:12px 0 2px}
+  .stat{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;font-size:10.5px;color:var(--dim)}
+  .chip{border:1px solid var(--ui-line);border-radius:999px;padding:2px 7px;
+    display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.04)}
+  .dot{width:6px;height:6px;border-radius:50%;background:#43485a}
+  .dot.ok{background:#31d97a;box-shadow:0 0 7px #31d97a}
+  .dot.warn{background:#ffb63d}
+  .dot.bad{background:#ff3b52;box-shadow:0 0 7px #ff3b52}
+
+  /* ---------- HUD ---------- */
+  #hud{position:fixed;left:12px;top:12px;z-index:25;pointer-events:none}
+  #mode{display:inline-flex;align-items:center;gap:8px;background:var(--ui-bg);
+    backdrop-filter:blur(12px);border:1px solid var(--ui-line);border-radius:999px;
+    padding:6px 13px 6px 10px;font-size:12px;font-weight:700;letter-spacing:.08em}
+  #mode .led{width:8px;height:8px;border-radius:50%;background:#5a6070}
+  #mode.live .led{background:var(--hot);box-shadow:0 0 10px var(--hot)}
+  #mode.portal .led{background:var(--neon);box-shadow:0 0 10px var(--neon)}
+  #tip{margin-top:8px;font-size:11.5px;color:#8b93a8;max-width:270px;
+    text-shadow:0 1px 3px #000}
+  #err{position:fixed;left:12px;bottom:12px;z-index:35;max-width:min(560px,92vw);
+    background:rgba(60,10,18,.9);border:1px solid #ff2c4b66;border-radius:10px;
+    padding:9px 12px;font-size:11.5px;color:#ffd7dd;display:none;white-space:pre-wrap}
+  /* 诊断面板：画面不对时唯一可靠的信息来源 */
+  #diag{position:fixed;left:12px;bottom:12px;z-index:34;width:min(340px,92vw);
+    background:rgba(8,10,16,.88);backdrop-filter:blur(12px);border:1px solid var(--ui-line);
+    border-radius:10px;padding:8px 11px 10px;font-size:11px;line-height:1.65;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;display:none}
+  #diag.show{display:block}
+  #diag h4{margin:0 0 5px;font-size:11px;letter-spacing:.08em;color:var(--txt);
+    font-family:-apple-system,"PingFang SC",sans-serif}
+  #diag .r{display:flex;justify-content:space-between;gap:8px;color:var(--dim)}
+  #diag .r b{color:var(--txt);font-weight:600;text-align:right;word-break:break-all}
+  #diag .r.g b{color:#31d97a} #diag .r.y b{color:#ffb63d} #diag .r.r b{color:#ff5f72}
+  #diag .hint{margin-top:7px;padding-top:7px;border-top:1px solid var(--ui-line);
+    color:#ffb63d;font-family:-apple-system,"PingFang SC",sans-serif;font-size:11px}
+  /* 摄像头源元素：必须留在视口内、有真实尺寸。
+     用 2px + opacity:.01 + 移出视口的写法，某些 WebView / 内置浏览器会判定它不可见而
+     不解码，于是 videoWidth 永远是 0，启动流程静默卡死。这里靠 z-index 被画布盖住。 */
+  video#cam{position:fixed;left:0;bottom:0;width:160px;height:90px;opacity:.002;
+    z-index:1;pointer-events:none;object-fit:cover}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="gl"></canvas></div>
+<video id="cam" playsinline muted></video>
+
+<div id="hud">
+  <div id="mode"><span class="led"></span><span id="modeTxt">待机 · IDLE</span></div>
+  <div id="tip">捏合拇指+食指 → 穿上战衣　|　双手各摆一个 L → 拉开传送窗</div>
+</div>
+
+<div id="panel">
+  <header id="pHead"><span>SUIT CONTROL</span><span class="tg">— 收起</span></header>
+  <div class="body">
+    <div class="skins" id="skins">
+      <button data-k="0" class="on">经典红蓝</button>
+      <button data-k="1">格温白</button>
+      <button data-k="2">共生体黑</button>
+    </div>
+    <div class="sep"></div>
+    <div class="row"><label>战衣强度 <b id="v0">1.00</b></label>
+      <input type="range" id="s0" min="0" max="1" step="0.01" value="1"></div>
+    <div class="row"><label>蛛网密度 <b id="v1">13.0</b></label>
+      <input type="range" id="s1" min="0" max="34" step="0.5" value="13"></div>
+    <div class="row"><label>布料网格 <b id="v2">120</b></label>
+      <input type="range" id="s2" min="20" max="320" step="2" value="120"></div>
+    <div class="row"><label>面罩眼睛 <b id="v3">1.00</b></label>
+      <input type="range" id="s3" min="0" max="1.8" step="0.02" value="1"></div>
+    <div class="row"><label>边缘柔度 <b id="v4">1.60</b></label>
+      <input type="range" id="s4" min="0.2" max="4" step="0.05" value="1.6"></div>
+    <div class="row"><label>边光强度 <b id="v5">1.10</b></label>
+      <input type="range" id="s5" min="0" max="3" step="0.05" value="1.1"></div>
+    <div class="row"><label>城市天空 <b id="v6">0.55</b></label>
+      <input type="range" id="s6" min="0" max="1" step="0.01" value="0.55"></div>
+    <div class="row"><label>反光/湿度 <b id="v7">0.55</b></label>
+      <input type="range" id="s7" min="0" max="1.5" step="0.01" value="0.55"></div>
+    <div class="row"><label>兜帽（格温） <b id="v8">1.00</b></label>
+      <input type="range" id="s8" min="0" max="1" step="0.01" value="1"></div>
+    <div class="btns f3">
+      <button id="bFull">全身 F</button>
+      <button id="bMirror" class="on">镜像</button>
+      <button id="bFlip">切摄像头</button>
+    </div>
+    <div class="btns f3">
+      <button id="bShot">截图</button>
+      <button id="bRec">录制</button>
+      <button id="bDebug">骨骼</button>
+    </div>
+    <div class="btns f3">
+      <button id="bDiag">诊断 I</button>
+      <button id="bCamPath">相机路径 A</button>
+      <button id="bReCam">重启相机</button>
+    </div>
+    <div class="stat">
+      <span class="chip"><i class="dot" id="dHand"></i>Hands</span>
+      <span class="chip"><i class="dot" id="dSeg"></i>Seg</span>
+      <span class="chip"><i class="dot" id="dFace"></i>Face</span>
+      <span class="chip" id="fps">-- fps</span>
+    </div>
+  </div>
+</div>
+
+<div id="boot">
+  <div class="card">
+    <h1>SUIT <b>UP</b> — 实时<i>蜘蛛侠</i>战衣</h1>
+    <p>浏览器端实时人体换肤：MediaPipe 抠人体 + 识别手势，WebGL 片元着色器把你身上程序化生成一整套战衣（六边形布料、蛛网、胸口蛛徽、大白眼面罩），全程无素材、无上传、不联网推流。</p>
+    <div class="gestures">
+      <div class="g"><span>🤏</span><span><b>拇指 + 食指捏合</b> <em>— 开关全身战衣，捏合点会炸开一圈冲击波</em></span></div>
+      <div class="g"><span>👌</span><span><b>双手各摆一个 L</b>（拇指食指张开、其余三指收起）<em>— 在两手之间拉开一扇「传送窗」，只有窗内的你会变身</em></span></div>
+      <div class="g"><span>✋</span><span><b>双手放下 / 合拢</b> <em>— 窗口收拢，恢复现实</em></span></div>
+    </div>
+    <button class="primary" id="go">开启摄像头 · 进入</button>
+    <p class="note">画面只在本机处理。需要 <code>https://</code> 或 <code>localhost</code> 才能访问摄像头。<b>请用 Chrome / Edge 打开</b> —— 应用内置浏览器给出的摄像头轨道是 muted 的（灯亮但不吐画面），必然黑屏。快捷键：<code>F</code> 全身　<code>1/2/3</code> 换皮　<code>H</code> 收面板　<code>D</code> 骨骼　<code>I</code> 诊断</p>
+  </div>
+</div>
+
+<div id="err"></div>
+
+<div id="diag">
+  <h4>诊断（按 I 开关）</h4>
+  <div id="diagBody"></div>
+</div>
+
+<script type="module">
+/* =========================================================================
+   SUIT UP — 实时蜘蛛侠战衣
+   管线：camera -> tasks-vision (HandLandmarker | ImageSegmenter | FaceLandmarker)
+         -> uniforms -> 单 pass WebGL2 fragment shader 合成
+
+   为什么用 tasks-vision 而不是 legacy solutions：
+   legacy 的 hands.js / selfie_segmentation.js / face_mesh.js 各自在全局定义
+   Emscripten 的 `Module`，三个 <script> 同时存在就互相污染，实测报
+   「Aborted(Module.arguments has been replaced...)」，且 locateFile 会串到
+   别的包目录去请求资产（selfie_segmentation/ 下找 hands_...data → 404）。
+   tasks-vision 是 ESM、三个 task 共享同一份 fileset，官方设计支持共存。
+   wasm 与模型全部放在 assets/ 本地，零 CDN 依赖、离线可跑。
+   ========================================================================= */
+'use strict';
+
+import { FilesetResolver, HandLandmarker, ImageSegmenter, FaceLandmarker }
+  from './assets/vision_bundle.mjs';
+
+const $ = s => document.querySelector(s);
+const clamp = (a,b,c)=>Math.max(b,Math.min(c,a));
+const mix = (a,b,t)=>a+(b-a)*t;
+
+function fail(msg){
+  const e = $('#err'); e.style.display='block';
+  e.textContent = String(msg).slice(0,900);
+  console.error(msg);
+}
+
+/* ---------------------------------------------------------------- WebGL */
+const canvas = $('#gl');
+const gl = canvas.getContext('webgl2', {antialias:false, premultipliedAlpha:false, preserveDrawingBuffer:true});
+if(!gl) fail('这台浏览器没有 WebGL2。请用 Chrome / Edge / Safari 16+。');
+
+const VERT = `#version 300 es
+in vec2 aPos; out vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
+
+const FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 outColor;
+
+uniform sampler2D uCam;     // 摄像头
+uniform sampler2D uMask;    // 人体 mask (R = 置信度)
+uniform sampler2D uPlate;   // 可选背景板 / 上传图
+uniform sampler2D uRows;    // 1x64 逐行躯干轴: R=中心x, G=半宽, B=该行有效
+uniform int   uHasPlate;
+
+uniform vec2  uRes;         // canvas 像素
+uniform vec2  uVidRes;      // 视频像素
+uniform float uTime;
+
+// mask bbox (视频 uv 空间) 与胸口锚点
+uniform vec4  uBBox;        // x0,y0,x1,y1
+uniform vec3  uChest;        // xy = 胸口位置, z = 胸口可见度（脸部特写时趋 0）
+
+// 脸部（视频 uv 空间）：左右眼中心 / 额顶 / 下巴；w<0 表示无脸
+uniform vec4  uEyeL, uEyeR;
+uniform vec2  uBrow, uChin;
+
+// 手势 / 状态
+uniform float uSuit;        // 全身战衣 0..1
+uniform float uPortal;      // 传送窗 0..1
+uniform vec2  uWinQ[4];     // 传送窗四角 (视频 uv)。任意四边形：窗口跟着手的姿态转
+uniform vec3  uShock;       // xy 冲击波中心(视频uv), z 波龄(秒, <0 无)
+uniform float uMirror;
+
+// 参数
+uniform float uSuitAmt, uWebDens, uHexScale, uEyeSize, uSoft, uRim, uCyber, uGloss;
+uniform float uHood;         // 格温兜帽强度（仅 uSkin==1 生效）
+uniform int   uSkin;        // 0 经典 / 1 格温 / 2 共生体
+uniform int   uDebug;
+
+const float TAU = 6.2831853;
+
+/* ---------- 工具 ---------- */
+float h11(float p){ p = fract(p*0.1031); p *= p+33.33; p *= p+p; return fract(p); }
+float h21(vec2 p){ vec3 p3 = fract(vec3(p.xyx)*0.1031); p3 += dot(p3, p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+  return mix(mix(h21(i), h21(i+vec2(1,0)), f.x), mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), f.x), f.y);
+}
+float fbm(vec2 p){ float s=0., a=.5; for(int i=0;i<4;i++){ s+=a*vnoise(p); p*=2.03; a*=.5; } return s; }
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+float sdSeg(vec2 p, vec2 a, vec2 b){ vec2 pa=p-a, ba=b-a; float h=clamp(dot(pa,ba)/dot(ba,ba),0.,1.); return length(pa-ba*h); }
+float sdBox(vec2 p, vec2 b){ vec2 d = abs(p)-b; return length(max(d,0.))+min(max(d.x,d.y),0.); }
+
+/* 六边形网格：返回 (格内坐标, 到边距离, 格 id) */
+vec4 hexGrid(vec2 uv){
+  vec2 r = vec2(1.0, 1.7320508), h2 = r*0.5;
+  vec2 a = mod(uv, r) - h2, b = mod(uv - h2, r) - h2;
+  vec2 gv = dot(a,a) < dot(b,b) ? a : b;
+  vec2 ap = abs(gv);
+  float ed = 0.5 - max(dot(ap, normalize(vec2(1.0,1.7320508))), ap.x);
+  vec2 id = uv - gv;
+  return vec4(gv, ed, h21(floor(id*4.0)));
+}
+
+/* 蜘蛛徽 SDF（局部坐标，身长约 0.62）。
+   参照电影版（ref/movie/9.jpg）：腿比漫画版更修长、更弯，前后腿拉得很开，
+   腹部窄长——「瘦长蜘蛛」才是电影味，短粗腿是玩具味。 */
+float spiderMark(vec2 p){
+  p.x = abs(p.x);
+  float d = length((p - vec2(0.0, 0.075))/vec2(0.085,0.205)) - 1.0;      // 腹部（更窄长）
+  d = min(d, length((p - vec2(0.0,-0.150))/vec2(0.062,0.082)) - 1.0);    // 头胸
+  // 4 对腿：每对 = 外展段 + 折段，前后两对拉长
+  d = min(d, sdSeg(p, vec2(0.045,-0.165), vec2(0.245,-0.395)) - 0.0150);
+  d = min(d, sdSeg(p, vec2(0.245,-0.395), vec2(0.415,-0.120)) - 0.0110);
+  d = min(d, sdSeg(p, vec2(0.050,-0.108), vec2(0.290,-0.200)) - 0.0150);
+  d = min(d, sdSeg(p, vec2(0.290,-0.200), vec2(0.500,-0.015)) - 0.0110);
+  d = min(d, sdSeg(p, vec2(0.050,-0.042), vec2(0.300,-0.028)) - 0.0145);
+  d = min(d, sdSeg(p, vec2(0.300,-0.028), vec2(0.515, 0.160)) - 0.0105);
+  d = min(d, sdSeg(p, vec2(0.045, 0.028), vec2(0.262, 0.128)) - 0.0140);
+  d = min(d, sdSeg(p, vec2(0.262, 0.128), vec2(0.430, 0.345)) - 0.0100);
+  return d;
+}
+
+/* 面罩眼睛 SDF：内侧尖、外侧圆的杏仁形。
+   sz = 眼间距(span) * 用户系数；单眼半宽 ≈ 0.52*sz —— 蜘蛛侠面罩的眼几乎两眼相接，
+   这个比例是「像不像」的关键，之前给 0.128 结果小到看不见。 */
+float eyeShape(vec2 q, float sz){
+  q /= max(sz, 1e-4);
+  q = rot(0.22) * q;                                    // 外侧上扬
+  vec2 t = q / vec2(0.52, 0.345);
+  t.y /= mix(0.40, 1.06, smoothstep(-1.15, 0.42, t.x)); // 内角收尖
+  float n = 2.7;
+  float k = pow(pow(abs(t.x),n) + pow(abs(t.y),n), 1.0/n);
+  return (k - 1.0) * 0.345 * max(sz,1e-4);
+}
+
+
+/* 单层楼群剪影。坐标约定：p.y=0 是地平线，向下为正（画面底 ≈ +1），
+   楼从地平线**向上**长（p.y<0 的区域是楼身伸进天空的部分），向下一直填到画面底 ——
+   之前给楼加了下边界，结果楼群成了悬在半空的一条噪声带。
+   楼宽/楼高/窗格全部由 x 位置哈希出来 —— 无贴图、无素材，纯程序化。 */
+float buildingsLayer(vec2 p, float seed, float density, float hScale, out float win){
+  win = 0.0;
+  float bx = p.x * density;
+  float col = floor(bx);
+  float h1 = h11(col + seed), h2 = h11(col + seed + 31.7);
+  float bw = mix(0.60, 0.94, h11(col+seed+5.1));            // 楼宽占格比例（留缝）
+  float bh = mix(0.03, 0.16, h1*h1) * hScale;               // 楼顶高出地平线的量（画面比例）
+  if(h2 > 0.88) bh = mix(0.14, 0.30, h11(col+seed+9.3)) * hScale;  // 少数地标摩天楼
+  float top = -bh;
+  float halfW = bw*0.5;
+  float xin = 1.0 - smoothstep(halfW-0.008, halfW+0.008, abs(fract(bx)-0.5));
+  float body = xin * step(top, p.y);                        // 只有上边界，向下填满
+  // 窗格：行高 ~1.5% 画高，near 层 700px 下约 10px 一行，step() 不闪
+  vec2 wp = vec2(fract(bx)*7.0, (p.y-top)*66.0);
+  float wgrid = step(0.34, fract(wp.x)) * step(0.40, fract(wp.y));
+  float won = step(0.50, h21(floor(wp)+vec2(col*3.7+seed*13.0, seed)));
+  win = body * wgrid * won;
+  // 摩天楼顶尖（少数楼有个细尖顶，纽约天际线的标志性剪影）
+  float spireX = 1.0 - smoothstep(0.015, 0.035, abs(fract(bx)-0.5));
+  float spireY = step(top-bh*0.35, p.y) * step(p.y, top);
+  body = max(body, spireX*spireY*step(0.88,h2));
+  return body;
+}
+
+/* 城市上空视野：渐变天空 + 云 + 三层带视差的楼群剪影 + 大气透视雾。
+   night=0 参照 Homecoming 海报：白天蓝天白云、远景楼群偏灰白（空气透视）。
+   night=1 参照蜘蛛格温海报：深紫夜空 + 巨大月亮 + 洋红霓虹城市 + 星点。 */
+vec3 cityscape(vec2 sv, vec2 P, float aspect, float t, float night){
+  float y = sv.y;                                             // 0=画面顶部, 1=画面底部
+  // 天空：顶部深蓝 -> 地平线附近偏白（大气散射）。地平线压低到 0.86 ——
+  // 这是近景人像场景，天际线只该在画面底部做一条远景装饰带，不能占大半屏
+  // （旧版 0.52 把整个下半身糊进楼群里，实测明显不对，把人吃掉了）。
+  float horizon = 0.86;
+  float skyT = clamp(y/horizon, 0.0, 1.0);
+  vec3 skyTop  = mix(vec3(0.16,0.45,0.90), vec3(0.055,0.030,0.115), night);
+  vec3 skyHaze = mix(vec3(0.84,0.90,0.96), vec3(0.42,0.09,0.30),   night);
+  vec3 sky = mix(skyTop, skyHaze, pow(skyT, 1.4));
+
+  // 夜景：巨大月亮（参考图的视觉主体）。画在天空偏上，带月海斑点 + 边缘柔光
+  if(night > 0.01){
+    // 月亮偏左上：人站在画面正中，月亮放正中会被整个挡住（实测只露一圈边）
+    vec2 mc = vec2(aspect*0.21, 0.21);
+    float md = length((P - mc) / vec2(0.265, 0.265));
+    float disc = 1.0 - smoothstep(0.985, 1.015, md);
+    // 月海：低频 fbm 斑块，压暗一点点
+    float mare = fbm((P - mc)*7.0);
+    vec3 moonC = mix(vec3(0.97,0.93,0.92), vec3(0.80,0.72,0.76), smoothstep(0.42,0.66,mare));
+    // 边缘略暗（球体感）
+    moonC *= mix(1.0, 0.86, smoothstep(0.55, 1.0, md));
+    sky = mix(sky, moonC, disc*night);
+    // 月亮外一圈大气柔光
+    sky += vec3(1.0,0.86,0.92) * exp(-pow(md/1.55,2.0)) * 0.20 * night * (1.0-disc);
+    // 星点：稀疏的小亮点，只在月亮外
+    float sg = 78.0;
+    vec2 si = floor(P*sg);
+    float sh = h21(si);
+    float star = step(0.9955, sh) * (1.0-disc)
+               * (1.0 - smoothstep(0.06, 0.42, length(fract(P*sg)-0.5)));
+    sky += vec3(0.95,0.92,1.0) * star * night * (0.7 + 0.5*sin(t*2.4 + sh*40.0));
+  }else{
+    // 白天：太阳侧高光（画面右上略亮，呼应参考图光位）
+    float sunGlow = exp(-pow(length(P - vec2(aspect*0.78, 0.10))/0.55, 2.0));
+    sky += vec3(1.0,0.95,0.82) * sunGlow * 0.25;
+  }
+
+  // 云：低频 fbm 做絮状云团，只在天空区域出现，越靠近地平线越密（云层堆积）
+  float cloudN = fbm(vec2(P.x*1.3 + t*0.015, P.y*2.6));
+  float cloudMask = smoothstep(0.46, 0.62, cloudN) * smoothstep(0.02, 0.30, horizon-y);
+  cloudMask *= mix(0.55, 1.0, skyT);
+  vec3 cloudC = mix(vec3(0.99,0.99,1.0), vec3(0.52,0.20,0.42), night);
+  sky = mix(sky, cloudC, cloudMask*mix(0.85, 0.55, night));
+
+  vec3 col = sky;
+  if(y > horizon - 0.35){
+    // 三层楼群带视差：远层楼矮、色淡偏蓝（空气透视），近层楼高、色深、窗亮
+    float win;
+    vec3 farC  = mix(vec3(0.72,0.78,0.86),   vec3(0.30,0.13,0.30),   night);
+    vec3 midC  = mix(vec3(0.44,0.50,0.62),   vec3(0.17,0.075,0.20),  night);
+    vec3 nearC = mix(vec3(0.145,0.165,0.22), vec3(0.065,0.035,0.095),night);
+    // 夜景窗户是洋红霓虹（参考图那种粉紫灯海），白天只是浅灰反光
+    float winBoost = mix(1.0, 3.4, night);
+    vec3 winC = mix(vec3(1.0), vec3(1.0,0.32,0.66), night);
+    float far  = buildingsLayer(vec2(P.x*0.62 + 0.7,  y-horizon+0.030), 11.0, 5.0, 0.55, win);
+    col = mix(col, farC*(1.0+win*0.5*winBoost*0.4), far);
+    float mid  = buildingsLayer(vec2(P.x*0.86 + 3.1,  y-horizon+0.012), 41.0, 3.4, 0.85, win);
+    col = mix(col, midC + winC*win*0.55*winBoost*0.35, mid);
+    float near = buildingsLayer(vec2(P.x*1.05 + 8.4,  y-horizon), 97.0, 2.1, 1.35, win);
+    col = mix(col, nearC + winC*win*0.75*winBoost*0.35, near);
+    // 地面雾：地平线附近整体提亮，白天偏白、夜里偏洋红（灯光把雾染红）
+    float groundFog = smoothstep(horizon+0.02, horizon-0.10, y);
+    vec3 fogC = mix(vec3(0.80,0.85,0.90), vec3(0.62,0.14,0.42), night);
+    col = mix(col, fogC, groundFog*mix(0.30,0.42,night)*step(horizon-0.02,y));
+  }
+  // 顶部暗角，压一下天空避免过曝
+  float vig = smoothstep(1.3, 0.2, length((sv-vec2(0.5,0.38))*vec2(aspect,1.0)));
+  col *= mix(mix(0.90,0.62,night), mix(1.05,1.02,night), vig);
+  return col;
+}
+
+/* 皮肤配色。参照电影原版战衣（ref/movie/）：
+   经典红蓝 = Raimi 三部曲：深绯红 + 藏青 + **银色凸起蛛网**（银线是这套战衣的灵魂）
+   格温白   = 蜘蛛格温 / Ghost-Spider（Into the Spider-Verse）：
+              纯白主体 + 大面积黑（腋下到腿）+ **洋红/粉色蛛网**（不是紫色，紫色一眼假）
+              胸口是**白**蛛徽压在黑底上，青绿色芭蕾鞋
+   共生体黑 = 炭黑 + 灰白蛛网 */
+void skinCols(int k, out vec3 hot, out vec3 cool, out vec3 line, out vec3 eyeC, out vec3 web){
+  if(k==0){      hot=vec3(0.60,0.042,0.085); cool=vec3(0.038,0.082,0.40);
+                 line=vec3(0.05,0.02,0.05);  eyeC=vec3(0.96,0.98,1.0);  web=vec3(0.80,0.82,0.87); }
+  else if(k==1){ hot=vec3(0.965,0.955,0.975); cool=vec3(0.055,0.050,0.075);
+                 line=vec3(0.92,0.16,0.48);  eyeC=vec3(0.99,0.96,0.99); web=vec3(0.95,0.20,0.52); }
+  else {         hot=vec3(0.085,0.085,0.105);cool=vec3(0.035,0.035,0.05);
+                 line=vec3(0.42,0.44,0.55);  eyeC=vec3(0.96,0.99,1.0);  web=vec3(0.72,0.74,0.80); }
+}
+
+void main(){
+  /* ---- canvas uv -> 视频 uv（cover 映射） ---- */
+  float ca = uRes.x/uRes.y, va = uVidRes.x/max(uVidRes.y,1.0);
+  vec2 uv = vUv;
+  vec2 vid = uv;
+  if(ca > va){ float s = va/ca; vid.y = (uv.y-0.5)*s+0.5; }
+  else       { float s = ca/va; vid.x = (uv.x-0.5)*s+0.5; }
+  // 视频 uv: y 向下
+  vec2 sv = vec2(vid.x, 1.0 - vid.y);
+  if(uMirror > 0.5) sv.x = 1.0 - sv.x;
+
+  float aspect = uVidRes.x/max(uVidRes.y,1.0);
+  vec2 P = vec2(sv.x*aspect, sv.y);      // 等比度量空间
+
+  /* ---- 冲击波位移 ---- */
+  vec2 svW = sv;
+  float shockGlow = 0.0;
+  if(uShock.z >= 0.0){
+    float age = uShock.z;
+    vec2 c = vec2(uShock.x*aspect, uShock.y);
+    float d = length(P - c);
+    float front = age*0.95;
+    float band = exp(-pow((d-front)/0.085, 2.0)) * exp(-age*2.2);
+    float ripple = sin((d-front)*95.0) * band;
+    svW += normalize(P - c + 1e-5) * ripple * 0.022 / vec2(aspect,1.0);
+    shockGlow = band*1.5 + exp(-age*5.0)*exp(-pow(d/0.16,2.0))*1.2;
+  }
+
+  vec3 camCol = texture(uCam, vec2(svW.x, svW.y)).rgb;
+
+  /* ---- mask：两套模糊。大半径只用来做高度场/法线，小半径决定 alpha 边界。
+         用同一份大模糊同时当 alpha 会让战衣糊到轮廓外一圈（溢色晕）。 ---- */
+  float rad = uSoft / max(uVidRes.y, 1.0) * 2.2;
+  float h = 0.0, wsum = 0.0;
+  for(int i=0;i<13;i++){
+    float a = float(i)/13.0*TAU*3.0;
+    float rr = (float(i)+0.5)/13.0;
+    vec2 o = vec2(cos(a),sin(a)) * rad * rr * vec2(1.0, aspect);
+    float w = 1.0 - rr*0.72;
+    h += texture(uMask, sv+o).r * w; wsum += w;
+  }
+  h = h/max(wsum,1e-4);
+  float hC = texture(uMask, sv).r;
+  h = mix(h, hC, 0.34);
+
+  // alpha 用的小半径模糊：只为了消锯齿，不外扩
+  float hE = hC * 2.0, wE = 2.0;
+  for(int i=0;i<6;i++){
+    float a = float(i)/6.0*TAU;
+    vec2 o = vec2(cos(a),sin(a)) * (rad*0.22 + 1.0/uVidRes.y) * vec2(1.0, aspect);
+    hE += texture(uMask, sv+o).r; wE += 1.0;
+  }
+  hE /= wE;
+
+  // 法线（来自高度场梯度）
+  float e = rad*0.9 + 1.2/uVidRes.y;
+  float hx = texture(uMask, sv+vec2(e,0)).r - texture(uMask, sv-vec2(e,0)).r;
+  float hy = texture(uMask, sv+vec2(0,e)).r - texture(uMask, sv-vec2(0,e)).r;
+  vec2 grad = vec2(hx, hy) / max(e*40.0, 1e-4);
+  vec3 N = normalize(vec3(-grad.x, -grad.y, 1.0));
+
+  float body = smoothstep(0.46, 0.58, hE);
+
+  /* ---- 传送窗遮罩：任意四边形 ----
+     移植自 sophiamyang/finger-frame-effect：角点直接用双手拇指/食指指尖，
+     窗口跟着手的姿态旋转/透视，不再是轴对齐矩形。 ---- */
+  vec2 q[4];
+  for(int i=0;i<4;i++) q[i] = vec2(uWinQ[i].x*aspect, uWinQ[i].y);
+  float wdU = 1e3, arcAt = 0.0, peri = 0.0;
+  for(int i=0;i<4;i++){
+    vec2 a = q[i], b = q[(i+1)%4];
+    vec2 pa = P - a, ba = b - a;
+    float len = max(length(ba), 1e-5);
+    float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+    float dseg = length(pa - ba*h);
+    if(dseg < wdU){ wdU = dseg; arcAt = peri + h*len; }  // 沿周长弧长参数（虚线要用）
+    peri += len;
+  }
+  // 内部判定用射线法（even-odd）而不是「所有边同侧」：
+  // 同侧判定只对凸四边形成立 —— 手一转，解剖学顺序的角点会连成自交的
+  // 「蝴蝶结」，同侧判定直接判内部为空，窗里什么都不出（用户实测）。
+  // even-odd 会把蝴蝶结填成两个三角形，跟原版 canvas clip() 的行为一致。
+  float inQ = 0.0;
+  for(int i=0;i<4;i++){
+    vec2 a = q[i], b = q[(i+1)%4];
+    if((a.y > P.y) != (b.y > P.y)){
+      float xInt = a.x + (P.y - a.y)/(b.y - a.y)*(b.x - a.x);
+      if(P.x < xInt) inQ = 1.0 - inQ;
+    }
+  }
+  float wd = mix(wdU, -wdU, inQ);
+  float winIn = 1.0 - smoothstep(0.0, 0.006, wd);
+  float winEdge = exp(-pow(abs(wd)/0.012, 2.0));
+  float portal = uPortal * winIn;
+
+  // 战衣作用域：全身开关 ∪ 窗内
+  float suitZone = clamp(max(uSuit, portal), 0.0, 1.0);
+  float suit = body * suitZone * uSuitAmt;
+
+  /* ---- body-space UV（跟着人缩放，贴身） ---- */
+  vec2 bmin = uBBox.xy, bmax = uBBox.zw;
+  vec2 bs = max(bmax - bmin, vec2(0.04));
+  vec2 B = (sv - bmin)/bs;                 // 0..1 覆盖人体框
+  float bodyAR = (bs.x*aspect)/bs.y;
+  vec2 Bm = vec2(B.x*bodyAR, B.y);         // 等比 body 空间
+
+  vec3 hot, cool, lineC, eyeC, webC;
+  skinCols(uSkin, hot, cool, lineC, eyeC, webC);
+
+  /* ---- 红蓝分区（经典战衣走位） ----
+     关键：不能用 bbox 的绝对横坐标。人一张开手臂，bbox 就被手拉宽，
+     躯干只占中间一小块，于是「腋下侧条」「手套」全部错位、手臂还会被当成腰以下变蓝。
+     所以改用逐行躯干轴：torsoU ∈ [-1,1] 表示在本行主躯干内，|torsoU|>1 就是伸出去的手臂。 */
+  vec3 rowI = texture(uRows, vec2(0.5, sv.y)).rgb;
+  float rowC = rowI.r, rowHW = max(rowI.g, 0.012);
+  float torsoU = (sv.x - rowC) / rowHW;
+  float vv = B.y;
+  float uuC = clamp(torsoU, -1.9, 1.9) * 0.5;    // 0..0.5 ≈ 躯干中心 -> 躯干边缘
+  // 手臂/外延：只在上半身启用（腿分开时每条腿也会「超出主躯干」，那不是手臂）
+  float armAmt = smoothstep(1.04, 1.45, abs(torsoU))
+               * (1.0 - smoothstep(0.55, 0.68, vv)) * step(0.5, rowI.b);
+
+  // 经典战衣：红色胸腹向下收成 V，两侧腰线更高
+  float waist = 0.40 + 0.145*(1.0 - smoothstep(0.0, 0.42, abs(uuC)))
+              + 0.012*sin(B.x*9.0);
+  float low = smoothstep(waist-0.010, waist+0.010, vv);          // 腰以下 -> 冷色（布料拼接是硬边）
+  // 腋下侧条：躯干边缘的窄带（torsoU 语义下 0.5 就是躯干边缘）
+  float sideBand = smoothstep(0.30,0.36, abs(uuC)) * (1.0-smoothstep(0.46,0.52, abs(uuC)));
+  float side = sideBand * smoothstep(0.26,0.31,vv) * (1.0-smoothstep(0.44,0.52,vv));
+  float boot = smoothstep(0.90, 0.945, vv);                      // 靴子回到暖色
+  // 手臂（上臂 + 手套）保持暖色 —— 由 armAmt 接管，不再用 bbox 猜
+  float coolAmt = clamp((low + side - boot) * (1.0 - armAmt*0.95), 0.0, 1.0);
+  // 格温：参照 Into the Spider-Verse —— 白色只在**兜帽/肩部/手臂**，
+  // 胸口正中往下是一大块黑（黑色从领口一路连到腿），白蜘蛛压在这块黑上。
+  // 旧版按经典款「腰以下变黑」，于是胸口是白的、白蛛徽画在白底上直接隐形。
+  if(uSkin==1){
+    // 中央黑色区：领口下方开始，横向占躯干中段，向下一直到脚
+    float coreY = smoothstep(0.16, 0.26, vv);                      // 领口以下
+    float coreX = 1.0 - smoothstep(0.30, 0.46, abs(uuC));          // 躯干中段
+    float core  = coreY * coreX;
+    // 腰以下整体转黑（腿是黑紧身裤）
+    float legs  = smoothstep(0.46, 0.56, vv);
+    // 青绿芭蕾鞋：脚尖那一小段不算黑（后面单独上色）
+    float shoe  = smoothstep(0.945, 0.975, vv);
+    // armAmt 是「手臂」的**宽渐变**过渡带（smoothstep 1.04→1.45）。直接乘上去
+    // 会在肩部拉出一大片 白/黑 的中间灰，再叠边光和网就读成两团粉污渍，
+    // 白肩和黑胸都不干净。参考图里格温的黑白分界是**硬边**（漫画分色），
+    // 所以这里把手臂闸门二值化，只保留一点点抗锯齿宽度。
+    float armHard = smoothstep(0.42, 0.58, armAmt);
+    coolAmt = clamp((max(core, legs) - shoe) * (1.0 - armHard), 0.0, 1.0);
+    // 分界本身也收硬：把 0~1 的软过渡挤到中间一小段
+    coolAmt = smoothstep(0.40, 0.60, coolAmt);
+  }
+  if(uSkin==2) coolAmt = clamp(low*0.35, 0.0, 1.0);
+  vec3 base = mix(hot, cool, coolAmt);
+  // 格温的青绿芭蕾鞋（参考图里脚上那抹亮青绿，是这套配色的点睛）
+  if(uSkin==1){
+    float shoeZone = smoothstep(0.940, 0.968, vv) * (1.0 - armAmt);
+    base = mix(base, vec3(0.10,0.80,0.74), shoeZone*0.90);
+  }
+
+  /* ---- 六边形布料：面板凸起 + 缝线凹陷 + 细纤维噪声，做出乳胶/氨纶质感 ----
+     参照海报：近景布料能看出每块面板微微鼓起、面板间缝线是暗沟，
+     纯色块的 cellShade 太平；加密纤维高频噪声 + 把法线也按格子起伏扰动，
+     让后面的高光/边光真的响应这层凹凸，而不只是贴纹理。 */
+  vec2 hexP = Bm * uHexScale + grad*2.4;         // 用法线扰动 -> 贴着起伏
+  vec4 hx4 = hexGrid(hexP);
+  float cell = smoothstep(0.0, 0.055, hx4.z);          // 面板内部=1，缝线=0
+  float seam = 1.0 - cell;
+  // 面板中心鼓起（穹顶状高度场）：到边距离越大越凸，配合法线扰动做布料的"泡"
+  float panelBulge = smoothstep(0.0, 0.30, hx4.z) * (1.0 - seam);
+  vec3 fiberN = vec3(fbm(hexP*9.0)-0.5, fbm(hexP*9.0+vec2(5.2,1.7))-0.5, 0.0);
+  N = normalize(N + vec3(fiberN.xy*0.10 + (hx4.xy)*panelBulge*0.16, 0.0));
+  float fiber = 0.90 + 0.20*fbm(hexP*22.0 + P*4.0);     // 高频纤维颗粒
+  float cellShade = mix(0.68, 1.10, cell) * mix(0.90, 1.08, hx4.w) * fiber;
+  base *= cellShade;
+  // 缝线：暗色沟槽 + 沟槽亮边（面板凸起在缝线旁投下的窄高光），比纯暗线更有厚度感
+  float seamCore = 1.0 - smoothstep(0.0, 0.028, hx4.z);
+  float seamRim  = (1.0 - smoothstep(0.028, 0.075, hx4.z)) * (1.0 - seamCore);
+  base = mix(base, lineC, seamCore*0.72);
+  base += vec3(1.0) * seamRim * 0.10 * clamp(dot(N, vec3(-0.4,-0.5,0.7)), 0.0, 1.0);
+
+  /* ---- 蛛网：以胸口为原点的径向 + 同心。
+     参照电影（ref/movie/9.jpg）：Raimi 战衣的蛛网是**凸起的银线**，
+     线本身亮银、线两侧有一圈阴影（面板被缝线勒出鼓起感）、银线上有金属高光。
+     之前做成暗色凹陷缝线，离银线版差一个档次。 ---- */
+  vec2 chest = vec2(uChest.x*aspect, uChest.y);
+  vec2 rel = (P - chest) / max(bs.y, 0.05);
+  float ang = atan(rel.y, rel.x), rr = length(rel);
+  float radialN = 10.0;
+  float ra = abs(fract(ang/TAU*radialN + 0.5) - 0.5) * 2.0;
+  // 阈值 ∝ 1/rr，让径向线在远处也保持恒定粗细（像缝线，不是扇形）
+  float rw = 0.011/max(rr,0.14);
+  float radialW = 1.0 - smoothstep(rw*0.55, rw, ra);
+  float rings = abs(fract(pow(rr, 0.82)*uWebDens*0.5) - 0.5)*2.0;
+  float ringW = 1.0 - smoothstep(0.05, 0.09, rings);
+  ringW *= mix(0.5, 1.0, smoothstep(0.0, 0.55, ra));   // 弧线在两条径向线之间下垂
+  float webGate = step(0.5, uWebDens) * smoothstep(0.95, 0.72, rr) * (1.0 - coolAmt*0.94);
+  // 格温不用这套以胸口为心的径向网：参考图里她的胸腹是**纯黑无网**，网只出现在
+  // 兜帽内衬和袖子上（分别由 liningC / 菱形网负责）。径向线在白肩上汇聚会糊成
+  // 两团粉（实测肩部粉像素占比 37%，且 webDens=0 时掉到 6% —— 就是它），
+  // 白色辨识度全丢。所以格温这里直接闸掉。
+  if(uSkin==1) webGate = 0.0;
+  // 特写时 chest 落在脸上，径向线会在脸中央汇聚成一个刺眼的"太阳花"心。
+  // 网面本身保留（战衣全身都有网），只把中心那圈汇聚点按可见度淡掉。
+  webGate *= mix(smoothstep(0.10, 0.30, rr), 1.0, uChest.z);
+  float web = clamp(max(radialW, ringW*0.94), 0.0, 1.0) * webGate;
+  // 线两侧的一圈阴影：面板被缝线勒出「鼓包」的立体感
+  float webShadow = clamp(max(1.0-smoothstep(rw, rw*2.3, ra), 1.0-smoothstep(0.09,0.17,rings)), 0.0, 1.0)
+                  * (1.0 - web) * webGate;
+  base *= 1.0 - webShadow*0.30;
+  // 银线本体：沿线加一点明暗起伏，避免死板的纯色线
+  vec3 webLine = webC * (0.82 + 0.36*vnoise(P*40.0));
+  base = mix(base, webLine, web*0.90);
+
+  /* ---- 格温的手臂菱形网 ----
+     参照海报：格温的**袖子整条都是洋红菱形网格**，是这套战衣最抢眼的部分。
+     不能沿用以胸口为心的径向网：手臂离胸口远，径向线在那儿张成大扇形，
+     读起来是"辐射线"不是"网格"（实测手臂 r 峰值只有 19，几乎没网）。
+     所以单独铺一层旋转 45° 的正交格线，跟着 body 空间缩放。 */
+  if(uSkin==1){
+    // 密度实测：26.0 在手臂这种窄区会挤出极密的网，线再细也占满 —— 归因实验里
+    // 关掉这层网，手臂粉 28%→1%、白 11%→38%，它是"整条粉袖子"的唯一主凶
+    // （边光只贡献 0%，帽口内衬贡献约 11%）。降到 13.0 = 网格放大一倍。
+    vec2 dq = rot(0.785) * (Bm * 20.0);                  // 旋转 45° -> 菱形
+    vec2 dg = abs(fract(dq) - 0.5) * 2.0;
+    // 线宽必须细：参考图里白布是主色、洋红只是细网线。
+    // 旧版 smoothstep(0.80,0.94) + 0.80 混合让粉像素占到 88%，整条手臂读成"粉袖子"，
+    // 白色辨识度全丢。收到 (0.90,0.985) 后线宽约为原来 1/3，白布重新成为主色。
+    float diamond = max(1.0 - smoothstep(0.94, 0.995, dg.x),
+                        1.0 - smoothstep(0.94, 0.995, dg.y));
+    // 只铺在白色区（手臂/肩/兜帽），黑色胸腹保持干净（参考图如此）
+    float dGate = (1.0 - coolAmt*0.96) * step(0.5, uWebDens);
+    float dWeb = diamond * dGate;
+    base = mix(base, webC * (0.86 + 0.28*vnoise(P*36.0)), dWeb*0.42);
+    // 网线两侧的浅阴影，让网格有一点凸起感
+    float dShadow = max(1.0 - smoothstep(0.78, 0.92, dg.x),
+                        1.0 - smoothstep(0.78, 0.92, dg.y)) * (1.0-diamond) * dGate;
+    base *= 1.0 - dShadow*0.10;
+  }
+
+  /* ---- 胸口蛛徽 ----
+     uChest.z 是胸口可见度：脸部特写（脸占满人体框）时画面里根本没有胸口，
+     此时旧代码会把 cy clamp 回"框内"，而那个框就是一张脸 —— 蛛徽直接爬到脸上。
+     没有胸口就不画蛛徽，这才是对的。 */
+  // 格温的蛛徽比经典款更低、更大：参考图里它压在胸口那块黑色正中，
+  // 用经典款的偏移会让它跨在白/黑分界上 —— 上半个白蜘蛛画在白肩上直接隐形。
+  float markDrop = (uSkin==1) ? 0.145 : 0.035;
+  float markScale = (uSkin==1) ? 0.30 : 0.34;
+  vec2 mp = (P - chest - vec2(0.0, bs.y*markDrop)) / max(bs.y*markScale, 0.02);
+  float sd = spiderMark(mp);
+  float mark = (1.0 - smoothstep(0.0, 0.02, sd)) * uChest.z;
+  vec3 markC = (uSkin==1) ? vec3(0.98,0.97,0.99) : ((uSkin==2)? vec3(0.72,0.74,0.85) : vec3(0.045,0.02,0.05));
+  base = mix(base, markC, mark*0.95);
+
+  /* ---- 面罩：大白眼 ---- */
+  float faceMask = 0.0;
+  float hoodDbg = 0.0;      // 帽体覆盖，仅给 uDebug==2 的几何探针用
+  if(uEyeL.w > 0.0){
+    vec2 eL = vec2(uEyeL.x*aspect, uEyeL.y), eR = vec2(uEyeR.x*aspect, uEyeR.y);
+    vec2 axis = eR - eL;
+    float span = max(length(axis), 1e-4);
+    float a0 = atan(axis.y, axis.x);
+    vec2 fc = (eL+eR)*0.5;
+    vec2 q = rot(-a0) * (P - fc);
+    // 面罩底色区域（略大于脸）
+    float fd = length(q / vec2(span*1.28, span*1.66));
+    faceMask = 1.0 - smoothstep(0.86, 1.06, fd);
+    // 面部也铺细网格
+    base = mix(base, mix(hot, lineC, (1.0-cell)*0.4), faceMask*0.55);
+
+    float sz = span * uEyeSize;
+    vec2 qe = q - vec2(0.0, span*0.06);                // 面罩眼位比真人眼略高
+    vec2 qL = qe + vec2(span*0.56, 0.0); qL.x = -qL.x; // 左眼镜像使 +x 指向外侧
+    vec2 qR = qe - vec2(span*0.56, 0.0);
+    float dL = eyeShape(qL, sz), dR = eyeShape(qR, sz);
+    float d = min(dL, dR);
+    float inEye  = 1.0 - smoothstep(0.0, span*0.016, d);
+    // 电影版眼框是两层：贴镜片的黑线 + 外圈金属斜面（ref/movie/1.jpg）
+    float border = (1.0 - smoothstep(span*0.075, span*0.125, d)) * (1.0 - inEye);
+    float bevel  = (1.0 - smoothstep(span*0.125, span*0.185, d))
+                 * (1.0 - smoothstep(-span*0.02, span*0.075, -d)) * (1.0 - border) * (1.0 - inEye);
+
+    // 镜面白眼：上亮下暗 + 高光点 + 细蜂窝纹（电影镜片是穿孔网眼材质）
+    float gy = clamp(0.5 - qe.y/(span*0.55), 0.0, 1.0);
+    vec3 lens = mix(eyeC*0.42, eyeC*1.16, gy);
+    float mesh = 0.5 + 0.5*sin(qe.x/span*230.0)*sin(qe.y/span*230.0);
+    lens *= 0.955 + 0.045*mesh;
+    float spec = exp(-pow(length((qR - vec2(-sz*0.16, -sz*0.13))/(sz*0.17)),2.0))
+               + exp(-pow(length((qL - vec2(-sz*0.16, -sz*0.13))/(sz*0.17)),2.0));
+    lens += spec*0.85;
+    lens += (uSkin==1 ? vec3(0.88,0.14,0.45) : vec3(0.10,0.14,0.32)) * (1.0-gy)*0.85;
+
+    base = mix(base, vec3(0.02,0.015,0.03), border*0.95);
+    base = mix(base, vec3(0.55,0.57,0.62)*(0.7+0.6*gy), bevel*0.80);  // 金属斜面沿光变化
+    base = mix(base, lens, inEye*0.97);
+
+    /* ---- 格温兜帽（hood）----
+       参照 Into the Spider-Verse：白色连帽卫衣的帽子罩住整个头，
+       帽口是一个尖角朝下的开口（露出面罩），帽子内衬是洋红蛛网。
+
+       硬限制：只有人体轮廓 mask，帽子**画不到轮廓外**（超出的部分会被 alpha 切掉）。
+       所以不做"外扩的帽子"，改成「沿头部轮廓内侧的一圈白色宽边 + 内衬粉网」——
+       视觉上就是帽子罩住头、露出中间面罩，这是这套输入能做到的最接近参考图的读法。
+       第一版按参考图外扩（2.05×2.30 span）画，结果全被 mask 裁掉，头上什么都没多出来。 */
+    if(uSkin==1 && uHood > 0.01){
+      // 帽口：露脸的洞。比面罩略小，下缘收窄成尖角（格温帽口的标志形状）
+      vec2 fq = q - vec2(0.0, span*0.02);
+      float taper = mix(1.0, 0.60, smoothstep(0.0, span*1.25, fq.y));  // 下方收窄 -> 尖角
+      // 帽口收小到只露"面罩正脸"，头顶/两颊的白布才够宽、读得出是帽子
+      // 帽口必须明显小于头部 mask，否则帽体（= mask 内、帽口外那一圈）算出来
+      // 几乎是空集。纯绿探针实测：0.86×1.16 的帽口只留下 3% 帽体，等于没画。
+      // 收到 0.62×0.86 后帽体才有足够宽度读作"帽子罩住头"。
+      float hole = length(fq / vec2(span*0.74*taper, span*1.00));
+      // 帽体 = 面罩区域内、帽口之外的那一圈（贴着头轮廓的宽边）
+      float inHole = smoothstep(0.94, 1.06, hole);        // 1 = 在洞外（帽体上）
+      // 帽体范围用 body（真实人体 alpha）而不是 faceMask：
+      // faceMask 是「略大于脸」的椭圆，帽体只能占它边缘一窄条，读不出是帽子。
+      // body 是人体轮廓，头顶/两侧的布料都能铺到。
+      float headZone = body * (1.0 - smoothstep(span*2.4, span*3.6, q.y));  // 限制在头颈附近
+      float hood = headZone * inHole * uHood;
+      hoodDbg = hood;
+      // 帽沿：紧贴帽口内侧的一条厚边，内衬洋红蛛网从这里露出来
+      float lip = headZone * smoothstep(0.90, 1.02, hole)
+                * (1.0 - smoothstep(1.04, 1.30, hole)) * uHood;
+      // 帽体本体：白布，带体积明暗（顶部亮、贴脸侧暗）+ 布料纤维
+      float hshade = mix(0.70, 1.08, clamp(0.5 - q.y/(span*2.6), 0.0, 1.0));
+      vec3 hoodC = hot * hshade * (0.94 + 0.10*fbm(q/span*6.0));
+      // 内衬蛛网：以帽口为中心的径向 + 同心，用 line 色（洋红）
+      float hAng = atan(fq.y, fq.x), hRad = length(fq)/span;
+      float hRa = abs(fract(hAng/TAU*9.0 + 0.5) - 0.5)*2.0;
+      float hRadial = 1.0 - smoothstep(0.055, 0.115, hRa);
+      float hRing = 1.0 - smoothstep(0.05, 0.10, abs(fract(hRad*3.1)-0.5)*2.0);
+      float hWeb = clamp(max(hRadial, hRing*0.9), 0.0, 1.0);
+      vec3 liningC = mix(lineC*0.45, lineC, 0.45+0.55*hWeb);   // 内衬底色偏暗，网线亮
+      base = mix(base, hoodC, hood*0.96);
+      base = mix(base, liningC, lip*0.90);
+      // 帽檐在面罩上压出的阴影，制造前后关系
+      float hoodShadow = headZone * (1.0 - smoothstep(0.62, 0.94, hole))
+                       * smoothstep(0.40, 0.80, hole) * uHood;
+      base *= 1.0 - hoodShadow*0.30;
+    }
+  }else{
+    // 兜底：没检测到脸时，用人体框顶部估个头
+    float hv = smoothstep(0.16, 0.02, B.y);
+    faceMask = hv * smoothstep(0.24, 0.14, abs(uuC));
+  }
+
+  /* ---- 光照 / 反光 / 边光 ---- */
+  vec3 L = normalize(vec3(-0.45, -0.62, 0.72));
+  float lam = clamp(dot(N, L), 0.0, 1.0);
+  float ndv = clamp(N.z, 0.0, 1.0);
+  float fres = pow(1.0 - ndv, 3.2);
+  vec3 envCol = texture(uCam, clamp(sv + N.xy*0.16, vec2(0.001), vec2(0.999))).rgb;
+  float ambBoost = (uSkin==1) ? 0.16 : 0.0;    // 格温白布在背光侧不能掉成灰
+  vec3 shade = base * (0.52 + ambBoost + 0.72*lam);
+  shade += envCol * fres * uGloss * 0.85;                     // 环境反射（湿感）
+  float spec2 = pow(clamp(dot(reflect(-L, N), vec3(0,0,1)), 0.0, 1.0), 34.0);
+  shade += vec3(1.0) * spec2 * (0.35 + uGloss*0.5);
+  // 表面缓流波纹，让战衣“活”
+  shade *= 0.97 + 0.06*fbm(Bm*7.0 + vec2(0.0, uTime*0.25));
+
+  vec3 rimC = (uSkin==1)? vec3(1.0,0.35,0.68) : ((uSkin==2)? vec3(0.55,0.62,1.0) : vec3(1.0,0.88,0.68));
+  float rimA = pow(clamp(length(grad)*1.05, 0.0, 1.0), 3.0);
+  rimA *= smoothstep(0.50, 0.85, hE);         // 用小半径 alpha 收边，不跟着大模糊外溢
+  // 格温白布必须读作冷白，不能被粉边光染成一身粉：在亮布区把边光压掉大半
+  // （判据：base 亮度高 = 白布/兜帽区；黑胸腹和腿保留满强度粉边）
+  float rimGain = 1.0;
+  if(uSkin==1){
+    float lumBase = dot(base, vec3(0.299, 0.587, 0.114));
+    // 实测：0.30 还是太强 —— 头/帽区粉占 45%、白只 15%，白粉比整个反了。
+    // 手臂和头曲率大，rimA 常年满值，粉边糊掉整片白布。压到 0.08，
+    // 并把阈值下移到 0.30（帽体带体积明暗，亮度只有中段，也必须算白布）。
+    rimGain = mix(1.0, 0.08, smoothstep(0.30, 0.62, lumBase));
+  }
+  shade += rimC * rimA * uRim * 0.85 * rimGain;
+
+  /* ---- 背景：城市上空俯瞰（参照 Homecoming 海报：蓝天白云 + 纽约天际线 + 空气透视）---- */
+  vec3 bgSrc = camCol;
+  if(uHasPlate==1) bgSrc = mix(camCol, texture(uPlate, vec2(svW.x, svW.y)).rgb, 0.9);
+  // 夜景跟着皮肤切换：格温（uSkin==1）= 参考图那种粉紫夜城 + 大月亮
+  float night = (uSkin==1) ? 1.0 : 0.0;
+  vec3 city = cityscape(sv, P, aspect, uTime, night);
+  // 保留一点原始视频的明暗结构做柔光叠加，让背景不是完全脱离环境的贴图感
+  float lum = dot(bgSrc, vec3(0.299,0.587,0.114));
+  city *= 0.96 + 0.10*lum;
+  float bgAmt = uCyber * suitZone;
+  vec3 bgCol = mix(bgSrc, city, bgAmt);
+
+  /* ---- 合成 ---- */
+  vec3 col = mix(bgCol, shade, suit);
+
+  // 传送窗边框：色散 + 霓虹 + marching-ants 虚线 + 呼吸角点
+  // （虚线/角点样式移植自 finger-frame-effect 的 drawOutline）
+  if(uPortal > 0.01){
+    float g = winEdge * uPortal;
+    vec3 disp;
+    disp.r = texture(uCam, sv + vec2( 0.004,0.0)*g).r;
+    disp.g = texture(uCam, sv).g;
+    disp.b = texture(uCam, sv - vec2( 0.004,0.0)*g).b;
+    col = mix(col, disp, g*0.55);
+    col += mix(vec3(0.35,1.0,0.72), vec3(0.85,0.35,1.0), 0.5+0.5*sin(uTime*1.7+sv.y*9.0)) * g * 1.25;
+    // 行进虚线：沿四边形周长的弧长参数做 dash，随时间爬行
+    float dash = step(0.5, fract(arcAt*22.0 - uTime*1.6));
+    float line = (1.0 - smoothstep(0.0015, 0.004, abs(wd))) * dash;
+    col = mix(col, vec3(1.0), line * uPortal * 0.95);
+    // 角点：白色圆点 + 向外扩散的光晕环（呼吸）
+    for(int i=0;i<4;i++){
+      float dc = length(P - q[i]);
+      float rr0 = 0.011 + 0.002*sin(uTime*3.0 + float(i)*1.5);
+      col = mix(col, vec3(1.0), (1.0 - smoothstep(rr0*0.7, rr0, dc)) * uPortal);
+      float halo = fract(uTime*0.8 + float(i)*0.25);
+      float ring = 1.0 - smoothstep(0.0, 0.004, abs(dc - (rr0 + halo*0.05)));
+      col += vec3(1.0) * ring * (1.0-halo) * uPortal * 0.5;
+    }
+  }
+
+  // 冲击波：白热环 + 沿波前撒一层蛛网
+  if(uShock.z >= 0.0){
+    col += mix(vec3(1.0,0.35,0.42), vec3(0.55,0.72,1.0), 0.5) * shockGlow * 0.9;
+    float wv = clamp(1.0 - abs(length(P - vec2(uShock.x*aspect,uShock.y)) - uShock.z*0.95)/0.10, 0.0, 1.0);
+    col += webC * 0.0 + vec3(1.0) * wv * web * 0.5;
+  }
+
+  // uDebug==2：帽体几何探针。直接把 hood 覆盖输出成纯绿 —— 断言测「帽子有多大」
+  // 时不能去数画面里的白像素：帽口一放大，露出的面罩本身也是浅色，会被当成帽布，
+  // 于是回退帽口尺寸的破坏对照读不出差异（实测 0.301 vs 0.268，断言等于永真）。
+  if(uDebug==2){
+    outColor = vec4(0.0, hoodDbg, 0.0, 1.0);
+    return;
+  }
+  if(uDebug==1){
+    col = mix(col, vec3(0.0,1.0,0.4), (1.0-smoothstep(0.0,0.004,abs(wd)))*0.8);
+    col = mix(col, vec3(1.0,1.0,0.0), step(0.5, body)*0.10);
+    float bb = 1.0 - smoothstep(0.0,0.003, abs(sdBox((sv-(bmin+bmax)*0.5)*vec2(aspect,1.0), bs*0.5*vec2(aspect,1.0))));
+    col = mix(col, vec3(1.0,0.4,0.0), bb*0.7);
+  }
+
+  outColor = vec4(pow(clamp(col,0.0,1.0), vec3(0.985)), 1.0);
+}`;
+
+function shader(type, src, label){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    const log = gl.getShaderInfoLog(s);
+    fail('Shader 编译失败 ('+label+'):\n'+log);
+    throw new Error('shader '+label+': '+log);
+  }
+  return s;
+}
+let prog = null;
+if(gl){
+  prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, VERT, 'vert'));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FRAG, 'frag'));
+  gl.linkProgram(prog);
+  if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+    fail('Program link 失败:\n'+gl.getProgramInfoLog(prog));
+  }
+  gl.useProgram(prog);
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  window.__SHADER_OK__ = true;
+  window.__FRAG_SRC__ = FRAG;
+}
+
+const U = {};
+function u(name){ if(!(name in U)) U[name] = gl.getUniformLocation(prog, name); return U[name]; }
+
+function mkTex(unit){
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1,1,0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([12,12,18,255]));
+  return t;
+}
+const texCam = gl && mkTex(0), texMask = gl && mkTex(1), texPlate = gl && mkTex(2);
+// 1x64 逐行躯干轴纹理：R=躯干中心x, G=半宽, B=该行是否有效
+const rowsArr = new Uint8Array(64*4);
+for(let i=0;i<64;i++){ rowsArr[i*4]=128; rowsArr[i*4+1]=8; rowsArr[i*4+3]=255; }
+let texRows = null;
+if(gl){
+  texRows = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, texRows);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 64, 0, gl.RGBA, gl.UNSIGNED_BYTE, rowsArr);
+}
+function uploadRows(){
+  if(!texRows) return;
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, texRows);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 64, 0, gl.RGBA, gl.UNSIGNED_BYTE, rowsArr);
+}
+/* ---- 摄像头 -> 纹理：三级路径 ----
+   WebView / 内置浏览器里 texImage2D(HTMLVideoElement) 经常「不报错但传出全黑」，
+   这是已知兼容问题。所以不能 try{}catch(e){} 静默吞掉 —— 必须自己验证结果。
+   路径 A：直接上传 video（最快）
+   路径 B：video -> 2D canvas -> 上传 canvas（兼容性最好，多一次 drawImage）
+   诊断量全部挂在 DIAG 上，面板里能看到卡在哪一层。 */
+const DIAG = {
+  camPath:'A', glErr:0, glErrMsg:'', decoded:null, texLit:null,
+  probes:0, lastProbe:'', vTime:0, vTimeMoving:null, maskNonZero:null,
+  trackMuted:null,
+  // 每个模型最后一条单帧异常 + 累计次数。空 catch 是禁忌，异常必须留痕。
+  detErr:{ hand:'', seg:'', face:'' },
+  detErrN:{ hand:0, seg:0, face:0 },
+};
+let camBridge = null, camBridgeCtx = null;
+function ensureBridge(w, h){
+  if(!camBridge){
+    camBridge = document.createElement('canvas');
+    camBridgeCtx = camBridge.getContext('2d', { willReadFrequently:false, alpha:false });
+  }
+  if(camBridge.width !== w || camBridge.height !== h){ camBridge.width = w; camBridge.height = h; }
+  return camBridge;
+}
+
+// 小图专门用来验证「video 到底有没有解码出画面」
+const probeCv = document.createElement('canvas'); probeCv.width = 24; probeCv.height = 14;
+const probeCtx = probeCv.getContext('2d', { willReadFrequently:true });
+function videoDecoded(){
+  try{
+    probeCtx.drawImage(video, 0, 0, 24, 14);
+    const d = probeCtx.getImageData(0,0,24,14).data;
+    let s = 0;
+    for(let i=0;i<d.length;i+=4) s += d[i]+d[i+1]+d[i+2];
+    return s > 24*14*3*4;         // 平均通道值 > 4 就算有画面
+  }catch(e){ DIAG.lastProbe = 'drawImage 失败: '+e.message; return false; }
+}
+
+function uploadCam(){
+  if(!gl || !video.videoWidth) return;
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texCam);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+  let src = video;
+  if(DIAG.camPath === 'B'){
+    const cv = ensureBridge(video.videoWidth, video.videoHeight);
+    try{ camBridgeCtx.drawImage(video, 0, 0, cv.width, cv.height); src = cv; }
+    catch(e){ DIAG.glErrMsg = 'drawImage 到桥接画布失败: '+e.message; return; }
+  }
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+  const err = gl.getError();
+  if(err !== gl.NO_ERROR){
+    DIAG.glErr = err;
+    DIAG.glErrMsg = 'texImage2D 返回 GL 错误 0x'+err.toString(16)+'（路径 '+DIAG.camPath+'）';
+  }
+}
+
+/* 上传后读回 1 个像素，确认纹理真的有内容。
+   只在启动后的前若干帧做几次 —— readPixels 会 stall 管线，不能每帧跑。 */
+function probeCamTexture(){
+  DIAG.probes++;
+  DIAG.decoded = videoDecoded();
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texCam, 0);
+  let lit = null;
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE){
+    const px = new Uint8Array(4);
+    const cx = Math.floor(video.videoWidth/2), cy = Math.floor(video.videoHeight/2);
+    gl.readPixels(cx, cy, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    lit = (px[0]+px[1]+px[2]) > 12;
+    DIAG.lastProbe = `中心像素 rgb(${px[0]},${px[1]},${px[2]})`;
+  }else{
+    DIAG.lastProbe = 'framebuffer 不完整，无法回读';
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fb);
+  DIAG.texLit = lit;
+
+  // video 解码正常但纹理是黑的 => texImage2D(video) 这条路不通，切桥接画布
+  if(DIAG.decoded && lit === false && DIAG.camPath === 'A'){
+    DIAG.camPath = 'B';
+    DIAG.glErrMsg = 'texImage2D(video) 传出全黑，已自动切到桥接画布路径 B';
+    const b = document.querySelector('#bCamPath'); if(b) b.textContent = '相机路径 B';
+    console.warn(DIAG.glErrMsg);
+    DIAG.texLit = null;                  // 让下一次探测重新判定新路径
+    return;
+  }
+  // 两条路都不行，或者 video 根本没解码：主动把诊断面板弹出来，别让用户对着黑屏猜
+  if(DIAG.probes >= 3 && (DIAG.decoded === false || lit === false)){
+    const d = document.querySelector('#diag');
+    if(d && !d.classList.contains('show')){
+      d.classList.add('show');
+      const b = document.querySelector('#bDiag'); if(b) b.classList.add('on');
+      renderDiag();
+      fail(DIAG.decoded === false
+        ? '摄像头有流但解码出来是全黑。\n最常见原因：摄像头正被同一个 App 的其它部分或别的程序占用。\n试试：关掉其它用摄像头的窗口 → 点面板「重启相机」；或换 Chrome 打开这个页面。'
+        : '摄像头画面无法写入 WebGL 纹理（两条路径都试过了）。\n点面板「相机路径」手动切换，或换 Chrome / Edge 打开。');
+    }
+  }
+}
+
+function upload(tex, unit, src){
+  if(!src) return;
+  gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+}
+// tasks-vision 的 mask 是单通道 0..255。走 R8/RED 上传，shader 里读 .r。
+// UNPACK_ALIGNMENT 必须设 1 —— mask 宽度不一定是 4 的倍数，默认 4 会导致逐行错位。
+// 注意 texImage2D 失败时不抛异常、只设 GL error，所以必须显式 getError 检查。
+let maskR8Ok = true;
+function uploadMaskR8(data, w, h){
+  if(!gl || !data) return;
+  // 顺手记录 mask 有没有内容（全 0 = 一个人都没抠出来）
+  let nz = 0;
+  for(let i=0;i<data.length;i+=97) if(data[i] > 128) nz++;
+  DIAG.maskNonZero = nz;
+
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texMask);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  if(maskR8Ok){
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+    if(gl.getError() === gl.NO_ERROR) return;
+    maskR8Ok = false;                       // 只降级一次，别每帧重试
+    console.warn('R8 单通道纹理不可用，退回 RGBA');
+  }
+  const rgba = new Uint8Array(w*h*4);
+  for(let i=0;i<w*h;i++){ rgba[i*4]=data[i]; rgba[i*4+3]=255; }
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+}
+
+/* ---------------------------------------------------------------- 状态 */
+const S = {
+  running:false, mirror:true, facing:'user', debug:false,
+  skin:0, suit:0, suitTarget:0, portal:0, portalTarget:0,
+  // 传送窗四角（视频 uv，解剖学顺序：A食指→B食指→B拇指→A拇指，A=左手）
+  winQ:  [[0.35,0.30],[0.65,0.30],[0.65,0.70],[0.35,0.70]],
+  winQS: [[0.35,0.30],[0.65,0.30],[0.65,0.70],[0.35,0.70]],
+  quadSeen:-99, jumpN:0,
+  shock:[0.5,0.5,-1],
+  bbox:[0.28,0.05,0.72,0.98], bboxS:[0.28,0.05,0.72,0.98],
+  chest:[0.5,0.34], chestS:[0.5,0.34], chestVis:1, chestVisForce:null, debugMode:null,
+  eyeL:[0,0,0,-1], eyeR:[0,0,0,-1], brow:[0,0], chin:[0,0],
+  faceSeen:-99, faceLock:false, pinchCool:0, lastPinch:false, hasPlate:0,
+  p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1 }
+};
+
+/* ---------------------------------------------------------------- 摄像头 */
+const video = $('#cam');
+let vidW = 640, vidH = 480, stream = null;
+
+// 等 metadata 必须带超时。某些 WebView / 内置浏览器里 video.play() 或 videoWidth
+// 可能永远不 resolve（元素太小或不可见时不解码），无限 await 会静默卡死整个启动流程。
+function waitMeta(ms){
+  return new Promise(res=>{
+    if(video.videoWidth) return res(true);
+    let done = false;
+    const ok = ()=>{ if(!done){ done=true; cleanup(); res(true); } };
+    const to = setTimeout(()=>{ if(!done){ done=true; cleanup(); res(false); } }, ms);
+    function cleanup(){
+      clearTimeout(to);
+      video.removeEventListener('loadedmetadata', ok);
+      video.removeEventListener('loadeddata', ok);
+      video.removeEventListener('canplay', ok);
+    }
+    video.addEventListener('loadedmetadata', ok);
+    video.addEventListener('loadeddata', ok);
+    video.addEventListener('canplay', ok);
+  });
+}
+
+/* muted 轨道自恢复。
+   实测（MiniMax Code 内置 WebView / 部分 Electron 应用）：getUserMedia 成功、
+   track.readyState === 'live'、系统摄像头指示灯也亮，但 track.muted === true —— 摄像头开着
+   却一帧都不吐，于是 video.readyState 停在 0、videoWidth 恒为 0、画面全黑。
+   muted 是**可恢复**状态（规范里由 source 决定），会以 unmute 事件解除。所以不能像原先那样
+   waitMeta 超时就走 track settings 兜底继续启动 —— 那只是把「黑屏」伪装成「已启动」。
+   这里挂上 mute/unmute 监听，一旦 unmute 就重新等 metadata 并恢复渲染。 */
+function watchTrackMute(t){
+  const sync = ()=>{
+    DIAG.trackMuted = t.muted;
+    if(t.muted){
+      DIAG.glErrMsg = '摄像头轨道进入 muted —— 摄像头已打开但不输出画面';
+    }else{
+      // 解除静音：重新等一次 metadata，把真实分辨率取回来
+      DIAG.glErrMsg = '';
+      waitMeta(4000).then(()=>{
+        if(video.videoWidth){
+          vidW = video.videoWidth; vidH = video.videoHeight;
+          DIAG.probes = 0; DIAG.texLit = null; DIAG.decoded = null;   // 让探测重新判定
+          console.info('摄像头 unmute，分辨率 ' + vidW + '×' + vidH);
+        }
+      });
+    }
+  };
+  t.addEventListener('mute', sync);
+  t.addEventListener('unmute', sync);
+  sync();
+}
+
+async function startCam(){
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{ facingMode:S.facing, width:{ideal:1280}, height:{ideal:720} }, audio:false });
+  video.srcObject = stream;
+  const vt = stream.getVideoTracks()[0];
+  if(vt) watchTrackMute(vt);
+  // play() 的 promise 在部分环境不 settle，别 await 它本身
+  try{ const pr = video.play(); if(pr && pr.catch) pr.catch(()=>{}); }catch(e){}
+  const got = await waitMeta(6000);
+  if(video.videoWidth){ vidW = video.videoWidth; vidH = video.videoHeight; }
+  else {
+    // 兜底：从 track settings 拿分辨率，仍然继续启动（unmute 后会被上面的监听纠正）
+    const st = vt && vt.getSettings();
+    vidW = (st && st.width) || 640; vidH = (st && st.height) || 480;
+    if(vt && vt.muted){
+      fail('摄像头已打开但没有输出画面（轨道 muted）。\n'
+         + '内置浏览器的 WebView 常有这个限制 —— 请用 Chrome 打开 http://localhost:8080 。\n'
+         + '按 I 可以看逐层诊断。');
+    }
+  }
+  return got;
+}
+
+/* ---------------------------------------------------------------- 检测层
+   tasks-vision：全部本地资源，三个 task 共享一份 wasm fileset。
+   API 是同步的 detectForVideo，因此不再需要 busy flag / 异步回调。 */
+const ASSET = './assets';
+let handLm=null, segmenter=null, faceLm=null;
+let maskCanvas=null, segReady=false, handsReady=false, faceReady=false;
+// 每个模型的加载状态：0 未开始 / 1 加载中 / 2 就绪 / 3 失败
+const mpState = { h:0, s:0, f:0 };
+let latestHands = [];
+// detectForVideo 的 timestamp 必须严格单调递增，否则 tasks-vision 直接抛错
+let mpTs = 0;
+const nextTs = () => (mpTs = Math.max(mpTs + 1, Math.round(performance.now())));
+
+function setLoadTip(txt){ const t = $('#tip'); if(t && txt) t.textContent = txt; }
+
+// 带超时的 initialize：CDN 慢/挂时不能让整条串行链无限挂起
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_,rej)=>setTimeout(()=>rej(new Error(label+' 加载超时（'+(ms/1000)+'s）')), ms))
+  ]);
+}
+
+async function initMP(){
+  let vision;
+  mpState.s = 1; setLoadTip('正在加载本地推理引擎…');
+  try{
+    vision = await withTimeout(FilesetResolver.forVisionTasks(ASSET+'/wasm'), 60000, '推理引擎');
+  }catch(e){
+    mpState.h = mpState.s = mpState.f = 3;
+    fail('推理引擎加载失败：'+e.message+
+         '\n检查 assets/wasm/ 是否完整（应有 vision_wasm_internal.js / .wasm）。');
+    setLoadTip('引擎加载失败 · 仍可用面板按钮和滑块');
+    return;
+  }
+
+  // GPU delegate 更快，但部分环境不支持；失败就退回 CPU
+  const mk = async (Cls, opts, label) => {
+    try{
+      return await withTimeout(Cls.createFromOptions(vision, {
+        ...opts, baseOptions:{ ...opts.baseOptions, delegate:'GPU' }
+      }), 45000, label+'(GPU)');
+    }catch(e){
+      console.warn(label+' GPU delegate 不可用，退回 CPU：', e.message);
+      return await withTimeout(Cls.createFromOptions(vision, {
+        ...opts, baseOptions:{ ...opts.baseOptions, delegate:'CPU' }
+      }), 60000, label+'(CPU)');
+    }
+  };
+
+  /* --- 1) 人体抠像（最重要，先加载） --- */
+  setLoadTip('正在加载人体抠像模型…');
+  try{
+    segmenter = await mk(ImageSegmenter, {
+      baseOptions:{ modelAssetPath: ASSET+'/models/selfie_segmenter.tflite' },
+      runningMode:'VIDEO', outputCategoryMask:false, outputConfidenceMasks:true,
+    }, '人体抠像模型');
+    mpState.s = 2;
+  }catch(e){ mpState.s = 3; segmenter = null; fail('人体抠像模型加载失败：'+e.message); }
+
+  /* --- 2) 手势 --- */
+  mpState.h = 1; setLoadTip('正在加载手势模型…');
+  try{
+    handLm = await mk(HandLandmarker, {
+      baseOptions:{ modelAssetPath: ASSET+'/models/hand_landmarker.task' },
+      runningMode:'VIDEO', numHands:2,
+      minHandDetectionConfidence:0.55, minTrackingConfidence:0.5,
+    }, '手势模型');
+    mpState.h = 2;
+  }catch(e){ mpState.h = 3; handLm = null; fail('手势模型加载失败：'+e.message+'\n可以用面板「全身 F」按钮代替捏合手势。'); }
+
+  /* --- 3) 面罩定位（可选，失败不影响主功能） --- */
+  mpState.f = 1; setLoadTip('正在加载面部模型…');
+  try{
+    faceLm = await mk(FaceLandmarker, {
+      baseOptions:{ modelAssetPath: ASSET+'/models/face_landmarker.task' },
+      runningMode:'VIDEO', numFaces:1, outputFaceBlendshapes:false,
+    }, '面部模型');
+    mpState.f = 2;
+  }catch(e){ mpState.f = 3; faceLm = null; }
+
+  const okCnt = [mpState.h,mpState.s,mpState.f].filter(v=>v===2).length;
+  setLoadTip(okCnt >= 2
+    ? '捏合拇指+食指 → 穿上战衣　|　双手各摆一个 L → 拉开传送窗'
+    : '部分模型未就位 · 可用面板按钮手动变身');
+  window.__MP_STATE__ = mpState;
+}
+
+/* 每帧跑一次检测。全部同步 API，直接读结果。 */
+function runDetect(){
+  if(!video.videoWidth || video.readyState < 2) return;
+  const ts = nextTs();
+
+  // 单帧检测失败不致命（时间戳竞争、GPU 忙），但绝不能静默吞掉 ——
+  // 否则「模型就绪但永远不出结果」这类问题在诊断面板上看不出任何痕迹。
+  // 只记最后一条 + 计数，不刷 console。
+  const note = (k, e) => { DIAG.detErr[k] = e.message || String(e); DIAG.detErrN[k]++; };
+
+  if(handLm){
+    try{
+      const r = handLm.detectForVideo(video, ts);
+      handsReady = true;
+      latestHands = r.landmarks || [];
+      onGesture(latestHands);
+    }catch(e){ note('hand', e); }
+  }
+
+  if(segmenter){
+    try{
+      segmenter.segmentForVideo(video, ts, res=>{
+        const m = res.confidenceMasks && res.confidenceMasks[0];
+        if(!m) return;
+        segReady = true;
+        // getAsUint8Array: 单通道 0..255 置信度，行优先、第一行 = 图像顶部
+        const data = m.getAsUint8Array();
+        uploadMaskR8(data, m.width, m.height);
+        computeBBoxFromMask(data, m.width, m.height);
+        m.close();                       // 必须释放，否则 GPU/内存泄漏
+        if(res.close) res.close();
+      });
+    }catch(e){ note('seg', e); }
+  }
+
+  faceTick++;
+  if(faceLm && (faceTick % 2 === 0)){    // 隔帧跑，省性能；landmark 有插值平滑
+    try{
+      const r = faceLm.detectForVideo(video, ts);
+      faceReady = true;
+      const L = r.faceLandmarks && r.faceLandmarks[0];
+      if(L){
+        S.faceSeen = performance.now()/1000;
+        const mid=(a,b)=>[ (L[a].x+L[b].x)/2, (L[a].y+L[b].y)/2 ];
+        const eL = mid(33,133), eR = mid(362,263);
+        const k = 0.45;
+        S.eyeL = [ mix(S.eyeL[0],eL[0],k), mix(S.eyeL[1],eL[1],k), 0, 1 ];
+        S.eyeR = [ mix(S.eyeR[0],eR[0],k), mix(S.eyeR[1],eR[1],k), 0, 1 ];
+        S.brow = [ mix(S.brow[0],L[10].x,k), mix(S.brow[1],L[10].y,k) ];
+        S.chin = [ mix(S.chin[0],L[152].x,k), mix(S.chin[1],L[152].y,k) ];
+      }
+    }catch(e){ note('face', e); }
+  }
+}
+
+/* 直接在 mask 的 Uint8Array 上按 step 降采样到 64x64 网格算 bbox + 逐行躯干轴。
+   比原来「drawImage 到小 canvas 再 getImageData」少一次 GPU→CPU 往返，也更准。
+   兼容层：传 canvas/ImageBitmap 时走旧路径（测试注入用）。 */
+function computeBBoxFromMask(data, w, h){
+  const G = 64;
+  const grid = computeBBoxFromMask._g || (computeBBoxFromMask._g = new Uint8Array(G*G));
+  for(let gy=0; gy<G; gy++){
+    const sy = Math.min(h-1, Math.floor((gy+0.5)*h/G));
+    const row = sy*w;
+    for(let gx=0; gx<G; gx++){
+      const sx = Math.min(w-1, Math.floor((gx+0.5)*w/G));
+      grid[gy*G+gx] = data[row+sx];
+    }
+  }
+  analyzeGrid(grid);
+}
+
+// grid: 64x64 单通道，值 0..255
+function analyzeGrid(g){
+  let x0=99, y0=99, x1=-1, y1=-1, cnt=0;
+  for(let y=0;y<64;y++) for(let x=0;x<64;x++){
+    if(g[y*64+x] > 128){
+      if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y;
+      cnt++;
+    }
+  }
+  if(cnt < 40) return;
+  const b = [x0/64, y0/64, (x1+1)/64, (y1+1)/64];
+  const k = 0.22;
+  for(let i=0;i<4;i++) S.bbox[i] = mix(S.bbox[i], b[i], k);
+
+  /* 逐行躯干轴：每行取「最长连续人体段」当主躯干。
+     张开的手臂会形成独立的短段，于是 |torsoU|>1，shader 靠这个把手臂认出来。 */
+  for(let y=0;y<64;y++){
+    let best=0, bStart=-1, bEnd=-1, cs=-1;
+    for(let x=0;x<64;x++){
+      const on = g[y*64+x] > 128;
+      if(on){ if(cs<0) cs=x; }
+      else if(cs>=0){ const len=x-cs; if(len>best){best=len;bStart=cs;bEnd=x-1;} cs=-1; }
+    }
+    if(cs>=0){ const len=64-cs; if(len>best){best=len;bStart=cs;bEnd=63;} }
+    const valid = best >= 2;
+    let c = valid ? ((bStart+bEnd+1)/2)/64 : 0.5;
+    let hw = valid ? (best/2)/64 : 0.02;
+    const i4 = y*4;
+    const kk = rowsArr[i4+2] ? 0.35 : 1.0;      // 首次直接写入，之后时间平滑
+    c  = rowsArr[i4]/255   + (c  - rowsArr[i4]/255)*kk;
+    hw = rowsArr[i4+1]/255 + (hw - rowsArr[i4+1]/255)*kk;
+    rowsArr[i4]   = Math.round(clamp(c,0,1)*255);
+    rowsArr[i4+1] = Math.round(clamp(hw,0,1)*255);
+    rowsArr[i4+2] = valid ? 255 : 0;
+    rowsArr[i4+3] = 255;
+  }
+  uploadRows();
+
+  // 胸口：脸可用时取眼睛下方，否则用框上部。
+  // 注意这里刻意用当帧原始框 b 而不是 S.bbox —— S.bbox 是平滑后的，
+  // 拿它做 clamp 会让胸口跟着框的迟滞一起漂。
+  let cx, cy, chestVis = 1.0;
+  const faceOk = S.faceLock || (performance.now()/1000 - S.faceSeen) < 0.5;
+  const bh = Math.max(b[3]-b[1], 1e-4);
+  if(faceOk && S.eyeL[3] > 0){
+    const ex = (S.eyeL[0]+S.eyeR[0])/2, ey = (S.eyeL[1]+S.eyeR[1])/2;
+    const span = Math.max(Math.hypot(S.eyeR[0]-S.eyeL[0], S.eyeR[1]-S.eyeL[1]), 1e-4);
+    // 成人比例：瞳距 ≈ 0.32 头高，眼在头高 0.5 处，胸线在 1.6 头高
+    // => 眼到胸 ≈ 1.1 头高 ≈ 3.4 * 瞳距
+    cx = ex; cy = ey + span*3.4;
+    // 胸口可见度：瞳距/框高。正常半身像 ≈ 0.10~0.16；脸怼到镜头前时
+    // 框基本就是一张脸，比值飙到 0.3+，此时画面里没有胸口 —— 蛛徽必须淡出，
+    // 否则下面的 clamp 会把它按在脸上（用户实测：蛛徽爬到鼻子上）。
+    chestVis = 1.0 - clamp((span/bh - 0.20)/0.10, 0, 1);
+    // 交叉校验只用来兜底防「脸尺度估歪」，范围放宽：
+    // 坐姿半身 vs 全身站立，胸口在人体框里的占比差很多
+    const lo = b[1] + bh*0.12, hi = b[1] + bh*0.55;
+    cy = Math.min(Math.max(cy, lo), hi);
+  }else{
+    cx = (b[0]+b[2])/2; cy = b[1] + bh*0.30;
+  }
+  S.chest[0] = mix(S.chest[0], cx, 0.2);
+  S.chest[1] = mix(S.chest[1], cy, 0.2);
+  S.chestVis = (S.chestVisForce !== null && S.chestVisForce !== undefined)
+              ? S.chestVisForce : mix(S.chestVis, chestVis, 0.15);
+}
+
+/* ---------------------------------------------------------------- 手势 */
+function handMetrics(lm){
+  const d=(a,b)=>Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y);
+  const scale = Math.max(d(0,9), 0.04);
+  const pinch = d(4,8)/scale;
+  // 中/无名/小指是否收起：指尖到掌根 < PIP 到掌根
+  const curled = [[12,10],[16,14],[20,18]].filter(([tip,pip]) => d(0,tip) < d(0,pip)*1.08).length;
+  return { pinch, curled, scale,
+    thumb:[lm[4].x, lm[4].y], index:[lm[8].x, lm[8].y],
+    wrist:[lm[0].x, lm[0].y] };
+}
+
+function onGesture(list){
+  const now = performance.now()/1000;
+  const hs = list.map(handMetrics);
+
+  /* 双手取景窗 —— 追踪管线移植自 sophiamyang/finger-frame-effect（同一套 audited pipeline）：
+     1. 解剖学角点顺序：A=左手(腕x小) → [A食指, B食指, B拇指, A拇指]，窗口跟手转
+     2. 迟滞：开窗要求严（张开>0.75×手长 且 三指收起），维持只要求张开>0.2 —— 手指微动不闪断
+     3. teleport rejection：整体位移 > 0.3 屏宽的孤立帧当误检丢弃，连续 2 帧才认
+     4. 速度自适应平滑：快甩手跟紧(α→0.85)，慢移动稳住(α→0.35)
+     5. 掉帧保持：按时间（不是帧数）—— 检测断 0.9s 内窗口原地保持，之后由 S.portal 渐隐 */
+  const needOpen = S.portalTarget > 0.5 ? 0.20 : 0.75;
+  const needCurl = S.portalTarget > 0.5 ? 0    : 2;
+  const Ls = hs.filter(m => m.pinch > needOpen && m.curled >= needCurl);
+  let target = null;
+  if(Ls.length >= 2){
+    const two = Ls.slice(0,2).sort((a,b)=>a.wrist[0]-b.wrist[0]);
+    const [A,B] = two;
+    const pts = [A.index, B.index, B.thumb, A.thumb];
+    // 面积闸：四点几乎共线/太小 = 不是取景手势（活跃时放宽，防止收窗途中闪断）
+    let area = 0;
+    for(let i=0;i<4;i++){ const p=pts[i], q2=pts[(i+1)%4]; area += p[0]*q2[1]-q2[0]*p[1]; }
+    if(Math.abs(area/2) >= (S.portalTarget>0.5 ? 0.0005 : 0.005)) target = pts;
+  }
+  if(target){
+    const moved = target.reduce((s,p,i)=>s+Math.hypot(p[0]-S.winQ[i][0], p[1]-S.winQ[i][1]), 0)/4;
+    if(S.portalTarget > 0.5 && moved > 0.30 && ++S.jumpN < 2){
+      // 孤立跳变：忽略这一帧（handLandmarker 偶发把别的东西认成手）
+    }else{
+      S.jumpN = 0;
+      const a = Math.min(0.85, Math.max(0.35, moved/0.05));
+      for(let i=0;i<4;i++){
+        S.winQ[i][0] += (target[i][0]-S.winQ[i][0])*a;
+        S.winQ[i][1] += (target[i][1]-S.winQ[i][1])*a;
+      }
+      S.quadSeen = now;
+      S.portalTarget = 1;
+    }
+  }else{
+    S.jumpN = 0;
+    if(now - S.quadSeen > 0.9) S.portalTarget = 0;   // 掉帧保持窗口，超时才收
+  }
+
+  // 单手捏合 → 全身开关（上升沿 + 冷却）
+  const pinching = hs.some(m => m.pinch < 0.33);
+  if(pinching && !S.lastPinch && now > S.pinchCool && S.portalTarget < 1){
+    S.suitTarget = S.suitTarget > 0.5 ? 0 : 1;
+    S.pinchCool = now + 0.8;
+    const m = hs.find(x=>x.pinch<0.33);
+    const cx = (m.thumb[0]+m.index[0])/2, cy = (m.thumb[1]+m.index[1])/2;
+    triggerShock(S.mirror ? cx : cx, cy);
+  }
+  S.lastPinch = pinching;
+}
+
+let shockT0 = -1;
+function triggerShock(x, y){ S.shock[0]=x; S.shock[1]=y; shockT0 = performance.now()/1000; }
+
+/* ---------------------------------------------------------------- 渲染 */
+let t0 = performance.now()/1000, frames=0, fpsT=0, lastMPT=0, faceTick=0, lastProbeT=0;
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio||1, 1.75);
+  const w = Math.round(innerWidth*dpr), h = Math.round(innerHeight*dpr);
+  if(canvas.width!==w || canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); }
+}
+addEventListener('resize', resize);
+
+function loop(){
+  requestAnimationFrame(loop);
+  if(!S.running || !gl || !prog) return;
+  const now = performance.now()/1000, t = now - t0;
+  resize();
+
+  // ---- 跑检测（同步 API；节流到最多每 8ms 一次）----
+  if(now - lastMPT > 0.008){ lastMPT = now; runDetect(); }
+  uploadCam();
+
+  // 启动后探测几次「video 有没有解码 / 纹理有没有内容」，需要时自动切到桥接画布路径。
+  // readPixels 会 stall 管线，所以只做有限几次。
+  // 注意：调度必须按**时间**而不是帧号 —— 软件渲染 / 低端机上一帧可能 0.5s，
+  // 用 frameNo % N 的话探测要十几秒才凑齐一轮，自动切路径 B 也就迟迟不触发。
+  if(DIAG.probes < 6 && video.videoWidth && (now - lastProbeT) > 0.35){
+    lastProbeT = now;
+    probeCamTexture();
+    DIAG.vTimeMoving = video.currentTime > DIAG.vTime + 1e-4;
+    DIAG.vTime = video.currentTime;
+  }
+
+  // ---- 平滑 ----
+  S.suit   = mix(S.suit,   S.suitTarget,   0.14);
+  S.portal = mix(S.portal, S.portalTarget, S.portalTarget>S.portal ? 0.28 : 0.16);
+  // 角点平滑在 onGesture 里做（速度自适应 α），这里只拷到上传缓冲
+  for(let i=0;i<4;i++){ S.winQS[i][0] = S.winQ[i][0]; S.winQS[i][1] = S.winQ[i][1]; }
+  if(!S.faceLock && (now - S.faceSeen) > 0.5){ S.eyeL[3] = -1; S.eyeR[3] = -1; }
+
+  const shockAge = shockT0 < 0 ? -1 : (now - shockT0);
+  if(shockAge > 2.4) shockT0 = -1;
+
+  // ---- uniforms ----
+  gl.uniform1i(u('uCam'),0); gl.uniform1i(u('uMask'),1); gl.uniform1i(u('uPlate'),2);
+  gl.uniform1i(u('uRows'),3);
+  gl.uniform1i(u('uHasPlate'), S.hasPlate);
+  gl.uniform2f(u('uRes'), canvas.width, canvas.height);
+  gl.uniform2f(u('uVidRes'), vidW, vidH);
+  gl.uniform1f(u('uTime'), t);
+  gl.uniform4f(u('uBBox'), S.bbox[0],S.bbox[1],S.bbox[2],S.bbox[3]);
+  gl.uniform3f(u('uChest'), S.chest[0], S.chest[1], S.chestVis);
+  gl.uniform4f(u('uEyeL'), S.eyeL[0],S.eyeL[1],0,S.eyeL[3]);
+  gl.uniform4f(u('uEyeR'), S.eyeR[0],S.eyeR[1],0,S.eyeR[3]);
+  gl.uniform2f(u('uBrow'), S.brow[0], S.brow[1]);
+  gl.uniform2f(u('uChin'), S.chin[0], S.chin[1]);
+  gl.uniform1f(u('uSuit'), S.suit);
+  gl.uniform1f(u('uPortal'), S.portal);
+  gl.uniform2fv(u('uWinQ'), S.winQS.flat());
+  gl.uniform3f(u('uShock'), S.shock[0], S.shock[1], shockAge);
+  gl.uniform1f(u('uMirror'), S.mirror?1:0);
+  const p = S.p;
+  gl.uniform1f(u('uSuitAmt'), p.suitAmt);
+  gl.uniform1f(u('uWebDens'), p.webDens);
+  gl.uniform1f(u('uHexScale'), p.hexScale);
+  gl.uniform1f(u('uEyeSize'), p.eyeSize);
+  gl.uniform1f(u('uSoft'), p.soft);
+  gl.uniform1f(u('uRim'), p.rim);
+  gl.uniform1f(u('uCyber'), p.cyber);
+  gl.uniform1f(u('uGloss'), p.gloss);
+  gl.uniform1f(u('uHood'), p.hood);
+  gl.uniform1i(u('uSkin'), S.skin);
+  gl.uniform1i(u('uDebug'), S.debugMode !== null ? S.debugMode : (S.debug?1:0));
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  window.__FRAMES__ = (window.__FRAMES__||0)+1;
+
+  // ---- HUD ----
+  frames++;
+  if(now - fpsT > 0.5){
+    $('#fps').textContent = Math.round(frames/(now-fpsT)) + ' fps';
+    frames=0; fpsT=now;
+    // 状态灯：灰=未开始 / 黄=加载中或已就位但没检测到目标 / 绿=正在出结果 / 红=失败
+    const led = (st, live) => 'dot' + (st===3 ? ' bad' : st===2 ? (live?' ok':' warn') : st===1 ? ' warn' : '');
+    $('#dHand').className = led(mpState.h, handsReady);
+    $('#dSeg').className  = led(mpState.s, segReady);
+    $('#dFace').className = led(mpState.f, faceReady && S.eyeL[3]>0);
+    const m = $('#mode');
+    if(S.portal > 0.5){ m.className='portal'; $('#modeTxt').textContent='传送窗 · PORTAL'; }
+    else if(S.suit > 0.5){ m.className='live'; $('#modeTxt').textContent='战衣 · SUIT UP'; }
+    else { m.className=''; $('#modeTxt').textContent='待机 · IDLE'; }
+    if($('#diag').classList.contains('show')) renderDiag();
+  }
+}
+
+/* 诊断面板。画面不对时，这里是唯一可靠的信息来源 ——
+   逐层报告 摄像头流 → 解码 → 纹理上传 → 抠像 → 手势，并直接给出结论。 */
+function renderDiag(){
+  const tr = tracks();
+  const row = (k, v, cls) => `<div class="r ${cls||''}"><span>${k}</span><b>${v}</b></div>`;
+  const yn = b => b === null ? '—' : (b ? '是' : '否');
+  const st = v => ['未开始','加载中','就绪','失败'][v] || '?';
+
+  // 逐层判断，第一个断掉的环节就是根因
+  let verdict = '', vcls = 'hint';
+  if(!stream)                       verdict = '① 没有摄像头流 —— getUserMedia 没成功';
+  else if(tr.muted)                 verdict = '① 摄像头已打开但轨道 muted —— 开着灯不吐画面。'
+                                            + '内置浏览器 WebView 常见限制，请改用 Chrome 打开 localhost:8080';
+  else if(tr.state.indexOf('ended') === 0) verdict = '① 摄像头轨道已结束（被系统或别的 App 抢走了）';
+  else if(!tr.live)                 verdict = '① 摄像头轨道不可用：' + tr.state;
+  else if(!video.videoWidth)        verdict = '② video 没有出分辨率 —— 元素被判定不可见或未解码';
+  else if(DIAG.vTimeMoving === false) verdict = '② video.currentTime 不推进 —— 画面卡住/没在播放';
+  else if(DIAG.decoded === false)   verdict = '② video 解码出来是全黑 —— 摄像头被别的程序占用？';
+  else if(DIAG.texLit === false && DIAG.camPath === 'B')
+                                    verdict = '③ 桥接画布也传不进纹理 —— WebGL 上传通道有问题';
+  else if(DIAG.glErr)               verdict = '③ 纹理上传报 GL 错误，见下方 glErr';
+  else if(mpState.s === 3)          verdict = '④ 抠像模型加载失败 —— 战衣无法定位人体';
+  else if(mpState.s === 2 && DIAG.maskNonZero === 0)
+                                    verdict = '④ 抠像跑通但没抠到人 —— 站远一点、让上半身完整入画、开灯';
+  else if(mpState.h === 3)          verdict = '⑤ 手势模型失败 —— 用面板「全身 F」按钮代替捏合';
+  else if(mpState.h === 2 && !handsReady && DIAG.detErrN.hand > 0)
+                                    verdict = '⑤ 手势推理每帧都在抛异常：' + DIAG.detErr.hand;
+  else if(mpState.h === 2 && !handsReady)
+                                    verdict = '⑤ 手势模型就绪但没看到手 —— 手完整入画、离镜头 30~60cm';
+  else { verdict = '各环节正常。捏合手势或按 F 试试。'; vcls = 'hint'; }
+
+  // 单帧异常留痕行：只在真的抛过的时候出现，避免正常态刷屏
+  const errRows = ['hand','seg','face'].filter(k=>DIAG.detErrN[k] > 0).map(k =>
+    row('　'+({hand:'手势',seg:'抠像',face:'面部'}[k])+'异常',
+        DIAG.detErrN[k] + ' 次 · ' + DIAG.detErr[k], 'r')).join('');
+
+  $('#diagBody').innerHTML =
+    row('① 摄像头流', stream ? (tr.live?'live':tr.state) : '无', stream&&tr.live?'g':'r') +
+    row('　设备', tr.label || '—') +
+    (tr.muted ? row('　muted', '是 —— 摄像头开着但不输出画面', 'r') : '') +
+    row('② 分辨率', video.videoWidth ? `${video.videoWidth}×${video.videoHeight}` : '0（异常）',
+        video.videoWidth?'g':'r') +
+    row('　readyState', video.readyState + '/4', video.readyState>=2?'g':'y') +
+    row('　在播放', yn(!video.paused) + (DIAG.vTimeMoving===false?' / 时间卡住':''),
+        (!video.paused && DIAG.vTimeMoving!==false)?'g':'y') +
+    row('　解码有画面', yn(DIAG.decoded), DIAG.decoded?'g':(DIAG.decoded===false?'r':'')) +
+    row('③ 相机路径', DIAG.camPath + (DIAG.camPath==='B'?'（桥接画布）':'（直传）')) +
+    row('　纹理有内容', yn(DIAG.texLit), DIAG.texLit?'g':(DIAG.texLit===false?'r':'')) +
+    row('　探测', DIAG.lastProbe || '—') +
+    (DIAG.glErrMsg ? row('　glErr', DIAG.glErrMsg, 'r') : '') +
+    row('④ 抠像模型', st(mpState.s), mpState.s===2?'g':(mpState.s===3?'r':'y')) +
+    row('　抠到人', DIAG.maskNonZero === null ? '—' : (DIAG.maskNonZero>0 ? '是('+DIAG.maskNonZero+')' : '否'),
+        DIAG.maskNonZero>0?'g':(DIAG.maskNonZero===0?'y':'')) +
+    row('⑤ 手势模型', st(mpState.h), mpState.h===2?'g':(mpState.h===3?'r':'y')) +
+    row('　看到手', yn(handsReady) + '(' + latestHands.length + ')', handsReady?'g':'y') +
+    row('⑥ 面部模型', st(mpState.f), mpState.f===2?'g':(mpState.f===3?'r':'y')) +
+    row('　看到脸', yn(S.eyeL[3] > 0), S.eyeL[3]>0?'g':'y') +
+    errRows +
+    row('画布', canvas.width + '×' + canvas.height) +
+    `<div class="${vcls}">${verdict}</div>`;
+}
+function tracks(){
+  if(!stream) return { live:false, muted:false, state:'无', label:'' };
+  const t = stream.getVideoTracks()[0];
+  if(!t) return { live:false, muted:false, state:'无视频轨', label:'' };
+  return { live: t.readyState === 'live' && t.enabled && !t.muted,
+           // muted 单独暴露：它和 ended 完全是两回事（muted 可自行恢复，ended 不可）
+           muted: t.readyState === 'live' && t.enabled && t.muted,
+           state: t.readyState + (t.muted?'/muted':'') + (t.enabled?'':'/disabled'),
+           label: t.label || '' };
+}
+
+/* ---------------------------------------------------------------- UI */
+const sliders = [
+  ['s0','v0','suitAmt', v=>v.toFixed(2)],
+  ['s1','v1','webDens', v=>v.toFixed(1)],
+  ['s2','v2','hexScale',v=>String(Math.round(v))],
+  ['s3','v3','eyeSize', v=>v.toFixed(2)],
+  ['s4','v4','soft',    v=>v.toFixed(2)],
+  ['s5','v5','rim',     v=>v.toFixed(2)],
+  ['s6','v6','cyber',   v=>v.toFixed(2)],
+  ['s7','v7','gloss',   v=>v.toFixed(2)],
+  ['s8','v8','hood',    v=>v.toFixed(2)],
+];
+for(const [sid,vid,key,fmt] of sliders){
+  const el = $('#'+sid);
+  el.addEventListener('input', ()=>{ S.p[key] = parseFloat(el.value); $('#'+vid).textContent = fmt(S.p[key]); });
+}
+$('#pHead').addEventListener('click', ()=>{
+  const pn = $('#panel'); pn.classList.toggle('collapsed');
+  pn.querySelector('.tg').textContent = pn.classList.contains('collapsed') ? '+ 展开' : '— 收起';
+});
+$('#skins').addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  setSkin(parseInt(b.dataset.k,10));
+});
+function setSkin(k){
+  S.skin = k;
+  [...$('#skins').children].forEach(b => b.classList.toggle('on', parseInt(b.dataset.k,10)===k));
+}
+$('#bFull').addEventListener('click', ()=>{
+  S.suitTarget = S.suitTarget>0.5?0:1;
+  $('#bFull').classList.toggle('on', S.suitTarget>0.5);
+  triggerShock(0.5, 0.45);
+});
+$('#bMirror').addEventListener('click', ()=>{ S.mirror=!S.mirror; $('#bMirror').classList.toggle('on',S.mirror); });
+$('#bFlip').addEventListener('click', async ()=>{
+  S.facing = S.facing==='user' ? 'environment' : 'user';
+  S.mirror = S.facing==='user';
+  $('#bMirror').classList.toggle('on', S.mirror);
+  try{ await startCam(); }catch(e){ fail('切换摄像头失败: '+e.message); }
+});
+$('#bDebug').addEventListener('click', ()=>{ S.debug=!S.debug; $('#bDebug').classList.toggle('on',S.debug); });
+$('#bDiag').addEventListener('click', ()=>{
+  const d = $('#diag'); d.classList.toggle('show');
+  $('#bDiag').classList.toggle('on', d.classList.contains('show'));
+  if(d.classList.contains('show')) renderDiag();
+});
+// 手动切换相机上传路径：自动探测万一没覆盖到，可以手抠
+$('#bCamPath').addEventListener('click', ()=>{
+  DIAG.camPath = DIAG.camPath === 'A' ? 'B' : 'A';
+  DIAG.texLit = null; DIAG.probes = 0; DIAG.glErr = 0;
+  DIAG.glErrMsg = '手动切到路径 ' + DIAG.camPath;
+  $('#bCamPath').textContent = '相机路径 ' + DIAG.camPath;
+  if($('#diag').classList.contains('show')) renderDiag();
+});
+$('#bReCam').addEventListener('click', async ()=>{
+  const b = $('#bReCam'); b.textContent = '重启中…';
+  try{
+    await startCam();
+    DIAG.texLit = null; DIAG.decoded = null; DIAG.probes = 0;
+    DIAG.glErr = 0; DIAG.glErrMsg = '';
+    $('#err').style.display = 'none';
+  }catch(e){ fail('重启相机失败：'+e.message); }
+  b.textContent = '重启相机';
+});
+$('#bShot').addEventListener('click', ()=>{
+  const a = document.createElement('a');
+  a.download = 'suitup-'+Date.now()+'.png';
+  a.href = canvas.toDataURL('image/png'); a.click();
+});
+let rec=null, chunks=[];
+$('#bRec').addEventListener('click', ()=>{
+  const b = $('#bRec');
+  if(rec && rec.state==='recording'){ rec.stop(); return; }
+  try{
+    const st = canvas.captureStream(30);
+    rec = new MediaRecorder(st, {mimeType:'video/webm;codecs=vp9'});
+    chunks=[];
+    rec.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+    rec.onstop = ()=>{
+      b.classList.remove('on'); b.textContent='录制';
+      const blob = new Blob(chunks,{type:'video/webm'});
+      const a=document.createElement('a'); a.download='suitup-'+Date.now()+'.webm';
+      a.href=URL.createObjectURL(blob); a.click();
+    };
+    rec.start(); b.classList.add('on'); b.textContent='■ 停止';
+  }catch(e){ fail('录制不可用: '+e.message); }
+});
+addEventListener('keydown', e=>{
+  const k = e.key.toLowerCase();
+  if(k==='f') $('#bFull').click();
+  else if(k==='d') $('#bDebug').click();
+  else if(k==='i') $('#bDiag').click();
+  else if(k==='h') $('#pHead').click();
+  else if(k==='1'||k==='2'||k==='3') setSkin(parseInt(k,10)-1);
+});
+
+$('#go').addEventListener('click', async ()=>{
+  const btn = $('#go'); btn.disabled=true; btn.textContent='正在开启摄像头…';
+  try{
+    await startCam();
+  }catch(e){
+    btn.disabled=false; btn.textContent='重试 · 开启摄像头';
+    fail('摄像头启动失败：'+e.message+
+         '\n（需要 https 或 localhost；系统设置 → 隐私与安全性 → 摄像头，确认已允许这个浏览器）');
+    return;
+  }
+  // 摄像头一就绪立刻进画面。模型在后台串行加载，就位后功能自动生效。
+  // 绝不能反过来（等模型再进），否则 CDN 一慢用户就永久卡在按钮上。
+  S.running = true;
+  $('#boot').classList.add('hide');
+  resize(); loop();
+  setLoadTip('画面已就绪 · 正在后台加载模型…');
+  initMP().catch(e=>fail('模型加载异常：'+e.message));
+});
+
+/* 无摄像头也能验证渲染管线（自动化冒烟测试用） */
+window.__DIAG__ = DIAG;
+window.__SUITUP_TEST__ = function(){
+  S.running = true; S.suitTarget = 1; S.suit = 1;
+  vidW = 1280; vidH = 720;
+  const c = document.createElement('canvas'); c.width=256; c.height=144;
+  const x = c.getContext('2d');
+  const g = x.createLinearGradient(0,0,256,144);
+  g.addColorStop(0,'#2a3f6a'); g.addColorStop(1,'#8a5a3a');
+  x.fillStyle=g; x.fillRect(0,0,256,144);
+  upload(texCam, 0, c);
+  const m = document.createElement('canvas'); m.width=128; m.height=128;
+  const mx = m.getContext('2d');
+  mx.fillStyle='#000'; mx.fillRect(0,0,128,128);
+  mx.fillStyle='#fff';
+  mx.beginPath(); mx.ellipse(64,26,10.5,13.5,0,0,7); mx.fill();   // 头
+  mx.fillRect(59,37,10,7);                                        // 颈
+  mx.beginPath(); mx.moveTo(45,45); mx.lineTo(83,45);
+  mx.lineTo(77,93); mx.lineTo(51,93); mx.closePath(); mx.fill();  // 肩+躯干
+  mx.lineWidth=9; mx.lineCap='round'; mx.strokeStyle='#fff';
+  mx.beginPath(); mx.moveTo(47,50); mx.lineTo(31,82); mx.stroke(); // 左臂
+  mx.beginPath(); mx.moveTo(81,50); mx.lineTo(97,82); mx.stroke(); // 右臂
+  mx.fillRect(52,92,9,34); mx.fillRect(67,92,9,34);                // 双腿
+  // 提取单通道，走和生产完全相同的路径（uploadMaskR8 + computeBBoxFromMask），
+  // 否则测试会绕过 R8 上传和降采样逻辑，那两处坏了也全绿。
+  const md = mx.getImageData(0,0,128,128).data;
+  const mask = new Uint8Array(128*128);
+  for(let i=0;i<128*128;i++) mask[i] = md[i*4];
+  uploadMaskR8(mask, 128, 128);
+  S.eyeL=[(64-4.7)/128, 24/128, 0, 1];      // 瞳距 ≈ 0.45 头宽
+  S.eyeR=[(64+4.7)/128, 24/128, 0, 1];
+  S.faceSeen = performance.now()/1000; S.faceLock = true;
+  for(let i=0;i<40;i++) computeBBoxFromMask(mask, 128, 128);  // 让 bbox/chest 收敛到位
+  S.portalTarget = 0;
+  triggerShock(0.5,0.4);
+  resize(); loop();
+  return true;
+};
+/* 几何探针钩子：uDebug==2 把帽体覆盖输出成纯绿，用来量「帽子实际多大」。 */
+window.__HOOD_PROBE__ = function(on){
+  S.debugMode = on ? 2 : null;
+  return S.debugMode;
+};
+/* 脸部特写测试钩子：注入一个「脸占满画面」的 mask（半身像 vs 大头照的区别）。
+   走真实 computeBBoxFromMask，验证 chestVis 闸门在没有胸口时真的关掉蛛徽。 */
+window.__CLOSEUP_TEST__ = function(closeup){
+  vidW = 1280; vidH = 720;
+  const m = document.createElement('canvas'); m.width=128; m.height=128;
+  const mx = m.getContext('2d');
+  mx.fillStyle='#000'; mx.fillRect(0,0,128,128);
+  mx.fillStyle='#fff';
+  let eyeY, eyeHalf;
+  if(closeup){
+    // 大头特写：一颗头几乎填满整帧，画面里没有胸口
+    mx.beginPath(); mx.ellipse(64,60,42,54,0,0,7); mx.fill();
+    eyeY = 52/128; eyeHalf = 17/128;
+  }else{
+    // 正常半身像（和 __SUITUP_TEST__ 同一套比例）
+    mx.beginPath(); mx.ellipse(64,26,10.5,13.5,0,0,7); mx.fill();
+    mx.fillRect(59,37,10,7);
+    mx.beginPath(); mx.moveTo(45,45); mx.lineTo(83,45);
+    mx.lineTo(77,93); mx.lineTo(51,93); mx.closePath(); mx.fill();
+    eyeY = 24/128; eyeHalf = 4.7/128;
+  }
+  const md = mx.getImageData(0,0,128,128).data;
+  const mask = new Uint8Array(128*128);
+  for(let i=0;i<128*128;i++) mask[i] = md[i*4];
+  uploadMaskR8(mask, 128, 128);
+  S.eyeL=[0.5-eyeHalf, eyeY, 0, 1];
+  S.eyeR=[0.5+eyeHalf, eyeY, 0, 1];
+  S.faceSeen = performance.now()/1000; S.faceLock = true;
+  S.chestVisForce = null;                  // 清掉可能残留的 override
+  S.chestVis = closeup ? 1 : 0;            // 从反方向起步，确保读到的是真收敛值
+  for(let i=0;i<80;i++) computeBBoxFromMask(mask, 128, 128);
+  return { chestVis: +S.chestVis.toFixed(3), chest: S.chest.map(v=>+v.toFixed(3)) };
+};
+/* 直接压住 chestVis，用来做「闸门开 vs 关」的像素对照。
+   detect 循环每帧会重算它，所以用一个 override 而不是直接赋值。 */
+window.__FORCE_CHEST_VIS__ = function(v){
+  S.chestVisForce = (v === null || v === undefined) ? null : +v;
+  if(S.chestVisForce !== null) S.chestVis = S.chestVisForce;
+  return S.chestVis;
+};
+/* 传送窗测试钩子：注入任意四边形角点（视频 uv），模拟双手取景。
+   quad 缺省是一个明显旋转的四边形 —— 轴对齐矩形测不出「任意四边形」是否真的生效。
+   同时强制关掉全身战衣：全身开着的话「窗内 vs 窗外」没有对比，窗的断言全部永真。 */
+window.__PORTAL_TEST__ = function(quad){
+  const q = quad || [[0.30,0.22],[0.72,0.32],[0.66,0.78],[0.24,0.66]];
+  for(let i=0;i<4;i++){ S.winQ[i][0]=q[i][0]; S.winQ[i][1]=q[i][1]; }
+  S.quadSeen = performance.now()/1000;
+  S.portalTarget = 1;
+  S.suitTarget = 0; S.suit = 0;
+  return true;
+};
+window.__PORTAL_STATE__ = () => ({
+  portal:+S.portal.toFixed(3), target:S.portalTarget,
+  quad:S.winQ.map(p=>[+p[0].toFixed(3), +p[1].toFixed(3)]),
+});
+/* 手势级注入：伪造 landmarks 走真实 onGesture 管线（迟滞/跳变/平滑都在被测路径上） */
+window.__GESTURE_TEST__ = (list) => { onGesture(list); return window.__PORTAL_STATE__(); };
+$('#boot') && (window.__BOOT_VISIBLE__ = ()=> !$('#boot').classList.contains('hide'));
+</script>
+</body>
+</html>
