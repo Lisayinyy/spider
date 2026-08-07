@@ -20,6 +20,8 @@
     overflow:hidden}
   #stage{position:fixed;inset:0;display:block;z-index:2}
   canvas#gl{position:absolute;inset:0;width:100%;height:100%;display:block}
+  canvas#vector{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:3;
+    pointer-events:none}
 
   /* ---------- 启动层（默认可见，不依赖 JS 显形） ---------- */
   #boot{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;
@@ -120,6 +122,7 @@
 </head>
 <body>
 <div id="stage"><canvas id="gl"></canvas></div>
+<canvas id="vector"></canvas>
 <video id="cam" playsinline muted></video>
 
 <div id="hud">
@@ -230,6 +233,13 @@ function fail(msg){
 
 /* ---------------------------------------------------------------- WebGL */
 const canvas = $('#gl');
+const vectorCanvas = $('#vector');
+const vx = vectorCanvas.getContext('2d');
+const gwenPlate = new Image();
+let gwenPlateReady = false;
+gwenPlate.onload = ()=>{ gwenPlateReady = true; };
+gwenPlate.onerror = e=>{ console.error('格温矢量底图加载失败', e); };
+gwenPlate.src = './assets/gwen-vector-plate.png';
 const gl = canvas.getContext('webgl2', {antialias:false, premultipliedAlpha:false, preserveDrawingBuffer:true});
 if(!gl) fail('这台浏览器没有 WebGL2。请用 Chrome / Edge / Safari 16+。');
 
@@ -586,8 +596,12 @@ void main(){
   float winEdge = exp(-pow(abs(wd)/0.012, 2.0));
   float portal = uPortal * winIn;
 
-  // 战衣作用域：全身开关 ∪ 窗内
-  float suitZone = clamp(max(uSuit, portal), 0.0, 1.0);
+  // 格温的传送窗由上层 2D 矢量插画完整接管。WebGL 这一层只保留摄像头，
+  // 不再把真人 mask 涂成旧战衣，否则四边形边缘抗锯齿时会露出方肩火柴人。
+  float vectorPortal = (uSkin==1) ? portal : 0.0;
+
+  // 战衣作用域：全身开关 ∪ 窗内；格温 portal 从这里扣掉，只留全身 F 兼容旧玩法
+  float suitZone = clamp(max(uSuit, portal - vectorPortal), 0.0, 1.0);
   float suit = body * suitZone * uSuitAmt;
 
   /* ---- body-space UV（跟着人缩放，贴身） ---- */
@@ -1107,7 +1121,7 @@ void main(){
 
   // 传送窗边框：色散 + 霓虹 + marching-ants 虚线 + 呼吸角点
   // （虚线/角点样式移植自 finger-frame-effect 的 drawOutline）
-  if(uPortal > 0.01){
+  if(uPortal > 0.01 && uSkin!=1){
     float g = winEdge * uPortal;
     vec3 disp;
     disp.r = texture(uCam, sv + vec2( 0.004,0.0)*g).r;
@@ -1755,6 +1769,150 @@ function onGesture(list){
 let shockT0 = -1;
 function triggerShock(x, y){ S.shock[0]=x; S.shock[1]=y; shockT0 = performance.now()/1000; }
 
+/* ---------------------------------------------------------------- 格温二维矢量层
+   参考视频真正的结构不是「把真人 mask 涂成战衣」，而是：
+   1. 双手拉出一条横向四边形窗口；
+   2. 窗口里出现一张完整设计好的角色插画 + 赛博城市；
+   3. 手部单独按 21 点骨架画成白手套。
+   这样人物肩线、头发、兜帽永远是设计稿的干净形状，不会继承人体分割的方肩/锯齿。 */
+function rr(ctx,x,y,w,h,r){
+  const q=Math.min(r,w/2,h/2); ctx.beginPath();
+  ctx.moveTo(x+q,y); ctx.arcTo(x+w,y,x+w,y+h,q); ctx.arcTo(x+w,y+h,x,y+h,q);
+  ctx.arcTo(x,y+h,x,y,q); ctx.arcTo(x,y,x+w,y,q); ctx.closePath();
+}
+function poly(ctx, pts){ ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]); for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i][0],pts[i][1]); ctx.closePath(); }
+function drawCyberCity(ctx,x,y,w,h){
+  const g=ctx.createLinearGradient(0,y,0,y+h); g.addColorStop(0,'#07142f'); g.addColorStop(.52,'#182267'); g.addColorStop(1,'#64256f');
+  ctx.fillStyle=g; ctx.fillRect(x,y,w,h);
+  ctx.globalAlpha=.7; ctx.fillStyle='#d8ecff'; ctx.beginPath(); ctx.arc(x+w*.76,y+h*.22,h*.13,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+  const colors=['#11183c','#171542','#241343'];
+  for(let layer=0;layer<3;layer++){
+    const base=y+h*(.55+layer*.12), bw=w*(.07+layer*.01), gap=w*.015;
+    ctx.fillStyle=colors[layer];
+    for(let i=-1;i<15;i++){
+      const bx=x+i*(bw+gap)+(layer%2)*bw*.4, bh=h*(.18+((i*37+layer*19)%100)/320);
+      ctx.fillRect(bx,base-bh,bw, bh+h);
+      ctx.fillStyle=layer===0?'#36d7ff':'#ff4db7';
+      for(let wy=base-bh+10;wy<base-6;wy+=15) for(let wx=bx+7;wx<bx+bw-5;wx+=13) ctx.fillRect(wx,wy,6,2);
+      ctx.fillStyle=colors[layer];
+    }
+  }
+  ctx.strokeStyle='rgba(46,222,255,.35)'; ctx.lineWidth=2;
+  for(let i=0;i<5;i++){ctx.beginPath();ctx.moveTo(x,y+h*(.18+i*.13));ctx.lineTo(x+w,y+h*(.12+i*.15));ctx.stroke();}
+}
+function drawWebGrid(ctx, pathFn, step, color){
+  ctx.save(); pathFn(); ctx.clip(); ctx.strokeStyle=color; ctx.lineWidth=2;
+  for(let x=-500;x<=500;x+=step){ctx.beginPath();ctx.moveTo(x,-500);ctx.quadraticCurveTo(x+12,0,x,500);ctx.stroke();}
+  for(let y=-500;y<=500;y+=step){ctx.beginPath();ctx.moveTo(-500,y);ctx.quadraticCurveTo(0,y+8,500,y);ctx.stroke();}
+  ctx.restore();
+}
+function drawGwenPoster(ctx,x,y,w,h){
+  ctx.save(); ctx.translate(x+w/2,y+h*.52); const s=Math.min(w/1000,h/650); ctx.scale(s,s);
+  // 背后发丝：把真人完全替换成插画角色，而不是沿真人 mask 涂色
+  ctx.fillStyle='#090919';
+  ctx.beginPath(); ctx.moveTo(-205,-230); ctx.quadraticCurveTo(-275,-70,-205,265); ctx.lineTo(-58,250);
+  ctx.quadraticCurveTo(-95,20,-72,-235); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(205,-230); ctx.quadraticCurveTo(275,-70,205,265); ctx.lineTo(58,250);
+  ctx.quadraticCurveTo(95,20,72,-235); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='#4e3d86'; ctx.lineWidth=8; ctx.globalAlpha=.7;
+  [-170,-130,130,170].forEach(xx=>{ctx.beginPath();ctx.moveTo(xx,-190);ctx.quadraticCurveTo(xx*1.25,40,xx*.9,230);ctx.stroke();}); ctx.globalAlpha=1;
+
+  // 肩与躯干：纯赛璐璐大色块，禁止布料噪点/高光把白色染脏
+  ctx.fillStyle='#f8f7ff'; ctx.strokeStyle='#28224e'; ctx.lineWidth=10; ctx.lineJoin='round';
+  ctx.beginPath(); ctx.moveTo(-410,285); ctx.quadraticCurveTo(-330,125,-160,100); ctx.lineTo(-82,68);
+  ctx.lineTo(82,68); ctx.lineTo(160,100); ctx.quadraticCurveTo(330,125,410,285); ctx.lineTo(360,350); ctx.lineTo(-360,350); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // 胸口黑色倒 V 与白色高领
+  ctx.fillStyle='#111126'; ctx.beginPath(); ctx.moveTo(-112,110);ctx.lineTo(0,340);ctx.lineTo(112,110);ctx.lineTo(62,72);ctx.lineTo(0,150);ctx.lineTo(-62,72);ctx.closePath();ctx.fill();
+  ctx.fillStyle='#f9f8ff'; ctx.beginPath();ctx.moveTo(-72,36);ctx.lineTo(0,150);ctx.lineTo(72,36);ctx.lineTo(52,-70);ctx.lineTo(-52,-70);ctx.closePath();ctx.fill();ctx.stroke();
+  // 领口洋红折线
+  ctx.strokeStyle='#f22b9a';ctx.lineWidth=18;ctx.beginPath();ctx.moveTo(-92,92);ctx.lineTo(-48,48);ctx.lineTo(0,135);ctx.lineTo(48,48);ctx.lineTo(92,92);ctx.stroke();
+  // 肩下粉色网格块：平滑曲线，不跟人体逐行 bbox 走，所以没有阶梯锯齿
+  const panel=()=>{ctx.beginPath();ctx.moveTo(-410,285);ctx.quadraticCurveTo(-340,145,-165,120);ctx.quadraticCurveTo(-220,220,-365,315);ctx.closePath();};
+  ctx.fillStyle='#f22b9a'; panel();ctx.fill(); drawWebGrid(ctx,panel,34,'rgba(220,230,255,.72)');
+  ctx.save();ctx.scale(-1,1);panel();ctx.fillStyle='#f22b9a';ctx.fill();drawWebGrid(ctx,panel,34,'rgba(220,230,255,.72)');ctx.restore();
+
+  // 脖颈与下半面罩
+  ctx.fillStyle='#f9f8ff';ctx.strokeStyle='#29234f';ctx.lineWidth=8;
+  ctx.beginPath();ctx.moveTo(-58,36);ctx.lineTo(-66,-105);ctx.lineTo(66,-105);ctx.lineTo(58,36);ctx.closePath();ctx.fill();ctx.stroke();
+  ctx.fillStyle='#dcd8f4';ctx.beginPath();ctx.moveTo(-58,12);ctx.lineTo(0,80);ctx.lineTo(58,12);ctx.lineTo(58,35);ctx.lineTo(0,108);ctx.lineTo(-58,35);ctx.closePath();ctx.fill();
+
+  // 头与兜帽外形
+  ctx.fillStyle='#fbfbff';ctx.strokeStyle='#28224e';ctx.lineWidth=10;
+  ctx.beginPath();ctx.moveTo(-205,-250);ctx.quadraticCurveTo(-170,-390,0,-410);ctx.quadraticCurveTo(170,-390,205,-250);
+  ctx.quadraticCurveTo(198,-90,112,-15);ctx.lineTo(-112,-15);ctx.quadraticCurveTo(-198,-90,-205,-250);ctx.closePath();ctx.fill();ctx.stroke();
+  // 紫罗兰内衬尖拱
+  ctx.fillStyle='#8b72ca';ctx.beginPath();ctx.moveTo(0,-345);ctx.lineTo(-142,-215);ctx.quadraticCurveTo(-110,-80,0,-38);ctx.quadraticCurveTo(110,-80,142,-215);ctx.closePath();ctx.fill();
+  ctx.fillStyle='#f8f7ff';ctx.beginPath();ctx.moveTo(0,-295);ctx.lineTo(-112,-190);ctx.quadraticCurveTo(-92,-68,0,-45);ctx.quadraticCurveTo(92,-68,112,-190);ctx.closePath();ctx.fill();
+  // 眼罩：直接使用参考图拟合出的旋转椭圆族。左右长轴 ±52°、长短轴约 2:1。
+  // 手画贝塞尔很容易变成两只圆护目镜；旋转椭圆的轮廓反而和参考眼白 IoU≈0.93。
+  function eye(sign){
+    ctx.save();ctx.translate(sign*76,-205);ctx.rotate(sign*.9076);
+    ctx.fillStyle='#861468';ctx.beginPath();ctx.ellipse(0,0,88,47,0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#f22b9a';ctx.beginPath();ctx.ellipse(0,0,81,40,0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.ellipse(1,-1,66,29,0,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='rgba(139,114,202,.35)';ctx.lineWidth=4;ctx.beginPath();ctx.ellipse(4,3,62,25,0,.12*Math.PI,.92*Math.PI);ctx.stroke();
+    ctx.restore();
+  }
+  eye(1);eye(-1);
+  // 下半穿孔面罩：薄紫线 + 稀疏斜孔，不再像一排牙齿/胡子
+  ctx.fillStyle='#f7f7ff';ctx.strokeStyle='#8276a5';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(-112,-132);ctx.quadraticCurveTo(0,-88,112,-132);ctx.lineTo(80,-48);ctx.lineTo(0,-12);ctx.lineTo(-80,-48);ctx.closePath();ctx.fill();ctx.stroke();
+  ctx.strokeStyle='#817b98';ctx.lineWidth=3;ctx.globalAlpha=.52;
+  for(let yy=-112;yy<-45;yy+=18) for(let xx=-74;xx<82;xx+=22){const span=82+(yy+112)*.16;if(Math.abs(xx)<span){ctx.beginPath();ctx.moveTo(xx-2,yy+5);ctx.lineTo(xx+3,yy-5);ctx.stroke();}}
+  ctx.globalAlpha=1;
+  // 漫画阴影与轮廓高光
+  ctx.fillStyle='rgba(96,83,155,.22)';ctx.beginPath();ctx.moveTo(0,-410);ctx.quadraticCurveTo(150,-385,196,-255);ctx.lineTo(155,-265);ctx.quadraticCurveTo(115,-350,0,-365);ctx.closePath();ctx.fill();
+  ctx.restore();
+}
+function screenPt(lm){
+  const x=(S.mirror ? 1-lm.x : lm.x)*vectorCanvas.width;
+  return [x,lm.y*vectorCanvas.height];
+}
+function drawVectorGlove(ctx,lm,alpha){
+  if(!lm||lm.length<21)return; const p=lm.map(screenPt);
+  ctx.save();ctx.globalAlpha=alpha;ctx.lineCap='round';ctx.lineJoin='round';
+  const bones=[[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20]];
+  // 掌面多边形
+  ctx.fillStyle='#f8f7ff';ctx.strokeStyle='#30265e';ctx.lineWidth=Math.max(2,vectorCanvas.width*.0024);
+  poly(ctx,[p[0],p[1],p[5],p[9],p[13],p[17]]);ctx.fill();ctx.stroke();
+  // 手背紫色结构片，让白手套有漫画分色，不是五根白管
+  ctx.fillStyle='rgba(126,98,190,.88)';poly(ctx,[p[1],p[5],p[9],p[13],p[17],p[0]]);ctx.fill();
+  ctx.fillStyle='#faf9ff';poly(ctx,[p[5],p[9],p[13],p[17],p[0]]);ctx.fill();
+  for(const chain of bones){
+    ctx.strokeStyle='#30265e';ctx.lineWidth=Math.max(7,vectorCanvas.width*.010);ctx.beginPath();ctx.moveTo(...p[chain[0]]);for(let i=1;i<chain.length;i++)ctx.lineTo(...p[chain[i]]);ctx.stroke();
+    ctx.strokeStyle='#faf9ff';ctx.lineWidth=Math.max(5,vectorCanvas.width*.0065);ctx.stroke();
+  }
+  // 紫色指节 + 洋红手腕
+  ctx.strokeStyle='#8a71c9';ctx.lineWidth=Math.max(1.5,vectorCanvas.width*.0018);
+  for(const i of [2,6,10,14,18]){ctx.beginPath();ctx.moveTo(...p[i]);ctx.lineTo(...p[i+1]);ctx.stroke();}
+  ctx.strokeStyle='#f22b9a';ctx.lineWidth=Math.max(4,vectorCanvas.width*.005);ctx.beginPath();ctx.moveTo(...p[0]);ctx.lineTo(...p[9]);ctx.stroke();
+  ctx.restore();
+}
+function drawVectorLayer(){
+  if(!vx)return; const dpr=Math.min(devicePixelRatio||1,1.75), w=vectorCanvas.width, h=vectorCanvas.height;
+  vx.clearRect(0,0,w,h);
+  if(S.skin!==1 || S.portal<.015)return;
+  const pts=S.winQS.map(p=>[(S.mirror?1-p[0]:p[0])*w,p[1]*h]);
+  const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
+  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  const pad=Math.max(30,(x1-x0)*.08), rw=(x1-x0)+pad*2, rh=Math.max((y1-y0)+pad*.35,rw*.40);
+  vx.save();vx.globalAlpha=Math.min(1,S.portal*1.18);poly(vx,pts);vx.clip();
+  if(gwenPlateReady){
+    // cover 裁切：保持底图比例，条带再扁也不拉伸角色；人物脸始终对准窗口中心。
+    const sw=gwenPlate.naturalWidth, sh=gwenPlate.naturalHeight, scale=Math.max(rw/sw,(rh+pad*.4)/sh);
+    const dw=sw*scale, dh=sh*scale, dx=x0-pad+(rw-dw)/2, dy=y0-pad*.2+(rh+pad*.4-dh)*.34;
+    vx.drawImage(gwenPlate,dx,dy,dw,dh);
+  }else{
+    drawCyberCity(vx,x0-pad,y0-pad*.2,rw,rh+pad*.4);
+    drawGwenPoster(vx,x0-pad,y0-pad*.2,rw,rh+pad*.4);
+  }
+  vx.restore();
+  // 干净的二维窗边：参考视频是细白线，不是厚霓虹传送门
+  vx.save();vx.globalAlpha=S.portal;vx.strokeStyle='rgba(235,248,255,.92)';vx.lineWidth=Math.max(2,w*.0022);poly(vx,pts);vx.stroke();
+  vx.setLineDash([12,9]);vx.strokeStyle='rgba(69,220,255,.75)';vx.lineWidth=Math.max(1,w*.001);poly(vx,pts);vx.stroke();vx.restore();
+  // 手套画在窗上方，和参考视频一样，手指不会被窗口裁断
+  for(const lm of latestHands)drawVectorGlove(vx,lm,S.portal);
+}
+
 /* ---------------------------------------------------------------- 渲染 */
 let t0 = performance.now()/1000, frames=0, fpsT=0, lastMPT=0, faceTick=0, lastProbeT=0;
 
@@ -1762,6 +1920,7 @@ function resize(){
   const dpr = Math.min(window.devicePixelRatio||1, 1.75);
   const w = Math.round(innerWidth*dpr), h = Math.round(innerHeight*dpr);
   if(canvas.width!==w || canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); }
+  if(vectorCanvas.width!==w || vectorCanvas.height!==h){ vectorCanvas.width=w; vectorCanvas.height=h; }
 }
 addEventListener('resize', resize);
 
@@ -1828,6 +1987,7 @@ function loop(){
   gl.uniform1i(u('uDebug'), S.debugMode !== null ? S.debugMode : (S.debug?1:0));
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  drawVectorLayer();
   window.__FRAMES__ = (window.__FRAMES__||0)+1;
 
   // ---- HUD ----
@@ -2136,6 +2296,34 @@ window.__FORCE_CHEST_VIS__ = function(v){
 /* 传送窗测试钩子：注入任意四边形角点（视频 uv），模拟双手取景。
    quad 缺省是一个明显旋转的四边形 —— 轴对齐矩形测不出「任意四边形」是否真的生效。
    同时强制关掉全身战衣：全身开着的话「窗内 vs 窗外」没有对比，窗的断言全部永真。 */
+window.__VECTOR_STATE__ = ()=>({
+  plateReady:gwenPlateReady,
+  plateSize:gwenPlateReady?[gwenPlate.naturalWidth,gwenPlate.naturalHeight]:[0,0],
+  skin:S.skin, portal:+S.portal.toFixed(3), hands:latestHands.length
+});
+window.__VECTOR_REDRAW__ = function(withHands=true){
+  if(!withHands) latestHands=[];
+  drawVectorLayer();
+  return window.__VECTOR_STATE__();
+};
+window.__VECTOR_TEST__ = function(quad){
+  const q = quad || [[0.18,0.28],[0.82,0.25],[0.84,0.72],[0.16,0.75]];
+  for(let i=0;i<4;i++){ S.winQ[i][0]=q[i][0]; S.winQ[i][1]=q[i][1]; S.winQS[i][0]=q[i][0]; S.winQS[i][1]=q[i][1]; }
+  S.skin=1; S.portalTarget=1; S.portal=1; S.suitTarget=0; S.suit=0;
+  // 两只标准 L 手，仅用于无摄像头截图验收；真人路径仍使用 hand_landmarker 的 21 点。
+  function fakeHand(side){
+    const cx=side<0?.18:.82, cy=.54, lm=Array.from({length:21},()=>({x:cx,y:cy}));
+    const sx=side<0?1:-1;
+    lm[0]={x:cx,y:.70}; lm[1]={x:cx+sx*.02,y:.62};lm[2]={x:cx+sx*.06,y:.57};lm[3]={x:cx+sx*.10,y:.52};lm[4]={x:cx+sx*.14,y:.49};
+    for(const [base,a,b,c] of [[5,.47,.38,.29],[9,.50,.40,.30],[13,.53,.43,.34],[17,.57,.48,.40]]){
+      lm[base]={x:cx+sx*(base===5?.01:base===9?-.005:base===13?-.02:-.035),y:base/100+.52};
+      lm[base+1]={x:lm[base].x,y:a};lm[base+2]={x:lm[base].x,y:b};lm[base+3]={x:lm[base].x,y:c};
+    }
+    return lm;
+  }
+  latestHands=[fakeHand(-1),fakeHand(1)];
+  resize(); drawVectorLayer(); return true;
+};
 window.__PORTAL_TEST__ = function(quad){
   const q = quad || [[0.30,0.22],[0.72,0.32],[0.66,0.78],[0.24,0.66]];
   for(let i=0;i<4;i++){ S.winQ[i][0]=q[i][0]; S.winQ[i][1]=q[i][1]; }
