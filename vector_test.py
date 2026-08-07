@@ -18,19 +18,22 @@ with sync_playwright() as p:
  pg.goto(f'http://127.0.0.1:{PORT}/index.html',wait_until='domcontentloaded');pg.wait_for_timeout(1400)
  pg.evaluate("()=>document.querySelector('#boot').classList.add('hide')");pg.evaluate('()=>window.__VECTOR_TEST__()');pg.wait_for_timeout(250)
  state=pg.evaluate('()=>window.__VECTOR_STATE__()')
- on=pg.evaluate(JS)
+ with_holes=pg.evaluate(JS)
  pg.evaluate('()=>window.__VECTOR_REDRAW__(false)');pg.wait_for_timeout(80)
- off=pg.evaluate(JS)
- out={'state':state,'on':on,'off':off,'errors':errs}
- # 有牙齿的语义：底图真加载；窗内是成片；窗外透明；手套开启让左手区白色/alpha显著增加
+ no_holes=pg.evaluate(JS)
+ moved=pg.evaluate('()=>window.__VECTOR_MOVE_WINDOW__()');pg.wait_for_timeout(80)
+ out={'state':state,'with_holes':with_holes,'no_holes':no_holes,'moved':moved,'errors':errs}
+ # 有牙齿的语义：底图真加载；窗内是成片；窗外透明；有手时挖出透明孔；窗口移动不拖动角色底图
+ rect_delta=max(abs(a-b) for a,b in zip(state['vectorRect'],moved['vectorRect']))
  checks={
    'plate_loaded': state['plateReady'] and state['plateSize'][0]>2000,
-   'strip_has_art': on['center']['alpha']>245 and on['center']['cyan']>.08 and on['center']['white']>.18,
-   'outside_clear': on['outside']['alpha']<1,
-   'glove_changes_hand_roi': on['leftHand']['alpha']-off['leftHand']['alpha']>25 and on['leftHand']['white']-off['leftHand']['white']>.04,
+   'strip_has_art': with_holes['center']['alpha']>245 and with_holes['center']['cyan']>.08 and with_holes['center']['white']>.18,
+   'outside_clear': with_holes['outside']['alpha']<1,
+   'real_hand_cutout': no_holes['leftHand']['alpha']-with_holes['leftHand']['alpha']>25,
+   'character_locked_to_face': rect_delta<1,
    'no_pageerror': not errs,
  }
- out['checks']=checks
+ out['rect_delta']=rect_delta;out['checks']=checks
  print(json.dumps(out,ensure_ascii=False))
  assert all(checks.values()), checks
  b.close()

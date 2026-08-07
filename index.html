@@ -1393,6 +1393,7 @@ const S = {
   chest:[0.5,0.34], chestS:[0.5,0.34], chestVis:1, chestVisForce:null, debugMode:null,
   eyeL:[0,0,0,-1], eyeR:[0,0,0,-1], brow:[0,0], chin:[0,0],
   faceSeen:-99, faceLock:false, pinchCool:0, lastPinch:false, hasPlate:0,
+  vectorRect:[0,0,0,0],
   p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1 }
 };
 
@@ -1867,24 +1868,20 @@ function screenPt(lm){
   const x=(S.mirror ? 1-lm.x : lm.x)*vectorCanvas.width;
   return [x,lm.y*vectorCanvas.height];
 }
-function drawVectorGlove(ctx,lm,alpha){
+function eraseRealHand(ctx,lm){
   if(!lm||lm.length<21)return; const p=lm.map(screenPt);
-  ctx.save();ctx.globalAlpha=alpha;ctx.lineCap='round';ctx.lineJoin='round';
-  const bones=[[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20]];
-  // 掌面多边形
-  ctx.fillStyle='#f8f7ff';ctx.strokeStyle='#30265e';ctx.lineWidth=Math.max(2,vectorCanvas.width*.0024);
-  poly(ctx,[p[0],p[1],p[5],p[9],p[13],p[17]]);ctx.fill();ctx.stroke();
-  // 手背紫色结构片，让白手套有漫画分色，不是五根白管
-  ctx.fillStyle='rgba(126,98,190,.88)';poly(ctx,[p[1],p[5],p[9],p[13],p[17],p[0]]);ctx.fill();
-  ctx.fillStyle='#faf9ff';poly(ctx,[p[5],p[9],p[13],p[17],p[0]]);ctx.fill();
-  for(const chain of bones){
-    ctx.strokeStyle='#30265e';ctx.lineWidth=Math.max(7,vectorCanvas.width*.010);ctx.beginPath();ctx.moveTo(...p[chain[0]]);for(let i=1;i<chain.length;i++)ctx.lineTo(...p[chain[i]]);ctx.stroke();
-    ctx.strokeStyle='#faf9ff';ctx.lineWidth=Math.max(5,vectorCanvas.width*.0065);ctx.stroke();
+  const dist=(a,b)=>Math.hypot(p[a][0]-p[b][0],p[a][1]-p[b][1]);
+  const palm=Math.max(dist(5,17),dist(0,9),18);
+  if(palm>vectorCanvas.width*.32 || palm<vectorCanvas.width*.012)return;
+  ctx.save();ctx.globalCompositeOperation='destination-out';ctx.lineCap='round';ctx.lineJoin='round';
+  // 掌面先挖实心区域，再沿真实骨骼逐根挖手指；这里只做遮罩，不生成任何假轮廓。
+  ctx.fillStyle='#000';poly(ctx,[p[0],p[1],p[5],p[9],p[13],p[17]]);ctx.fill();
+  const fingers=[[0,1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16],[17,18,19,20]];
+  ctx.strokeStyle='#000';ctx.lineWidth=Math.max(9,palm*.42);
+  for(const chain of fingers){
+    let valid=true;for(let i=1;i<chain.length;i++)if(dist(chain[i-1],chain[i])>palm*.82)valid=false;
+    if(!valid)continue;ctx.beginPath();ctx.moveTo(...p[chain[0]]);for(let i=1;i<chain.length;i++)ctx.lineTo(...p[chain[i]]);ctx.stroke();
   }
-  // 紫色指节 + 洋红手腕
-  ctx.strokeStyle='#8a71c9';ctx.lineWidth=Math.max(1.5,vectorCanvas.width*.0018);
-  for(const i of [2,6,10,14,18]){ctx.beginPath();ctx.moveTo(...p[i]);ctx.lineTo(...p[i+1]);ctx.stroke();}
-  ctx.strokeStyle='#f22b9a';ctx.lineWidth=Math.max(4,vectorCanvas.width*.005);ctx.beginPath();ctx.moveTo(...p[0]);ctx.lineTo(...p[9]);ctx.stroke();
   ctx.restore();
 }
 function drawVectorLayer(){
@@ -1897,9 +1894,25 @@ function drawVectorLayer(){
   const pad=Math.max(30,(x1-x0)*.08), rw=(x1-x0)+pad*2, rh=Math.max((y1-y0)+pad*.35,rw*.40);
   vx.save();vx.globalAlpha=Math.min(1,S.portal*1.18);poly(vx,pts);vx.clip();
   if(gwenPlateReady){
-    // cover 裁切：保持底图比例，条带再扁也不拉伸角色；人物脸始终对准窗口中心。
-    const sw=gwenPlate.naturalWidth, sh=gwenPlate.naturalHeight, scale=Math.max(rw/sw,(rh+pad*.4)/sh);
-    const dw=sw*scale, dh=sh*scale, dx=x0-pad+(rw-dw)/2, dy=y0-pad*.2+(rh+pad*.4-dh)*.34;
+    /* 底图锁定真人脸，而不是跟着窗口缩放。
+       底图中眼中心约在 (0.50W, 0.31H)，眼区总宽约 0.18W；真人瞳距约是眼区宽的 0.42。
+       因此用瞳距反推底图宽度，保证兜帽/肩线跟人稳定对齐；窗口只负责揭开哪一段。 */
+    const faceOk=S.eyeL[3]>0 && (S.faceLock || performance.now()/1000-S.faceSeen<.6);
+    let dx,dy,dw,dh;
+    if(faceOk){
+      const ex=((S.eyeL[0]+S.eyeR[0])*.5), ey=((S.eyeL[1]+S.eyeR[1])*.5);
+      const eyeSpan=Math.max(Math.hypot(S.eyeR[0]-S.eyeL[0],S.eyeR[1]-S.eyeL[1]),.025);
+      const screenX=(S.mirror?1-ex:ex)*w, screenY=ey*h;
+      // 实测底图眼距约 0.165W；真人 landmark 瞳距对应面罩眼距约 1.9 倍
+      dw=Math.min(w*1.55,Math.max(w*.72,eyeSpan*w*1.9/.165));
+      dh=dw*gwenPlate.naturalHeight/gwenPlate.naturalWidth;
+      dx=screenX-dw*.50; dy=screenY-dh*.31;
+    }else{
+      const scale=Math.max(rw/gwenPlate.naturalWidth,(rh+pad*.4)/gwenPlate.naturalHeight);
+      dw=gwenPlate.naturalWidth*scale;dh=gwenPlate.naturalHeight*scale;
+      dx=x0-pad+(rw-dw)/2;dy=y0-pad*.2+(rh+pad*.4-dh)*.34;
+    }
+    S.vectorRect=[dx,dy,dw,dh];
     vx.drawImage(gwenPlate,dx,dy,dw,dh);
   }else{
     drawCyberCity(vx,x0-pad,y0-pad*.2,rw,rh+pad*.4);
@@ -1909,8 +1922,14 @@ function drawVectorLayer(){
   // 干净的二维窗边：参考视频是细白线，不是厚霓虹传送门
   vx.save();vx.globalAlpha=S.portal;vx.strokeStyle='rgba(235,248,255,.92)';vx.lineWidth=Math.max(2,w*.0022);poly(vx,pts);vx.stroke();
   vx.setLineDash([12,9]);vx.strokeStyle='rgba(69,220,255,.75)';vx.lineWidth=Math.max(1,w*.001);poly(vx,pts);vx.stroke();vx.restore();
-  // 手套画在窗上方，和参考视频一样，手指不会被窗口裁断
-  for(const lm of latestHands)drawVectorGlove(vx,lm,S.portal);
+  // 在矢量层挖出真人双手，让摄像头中的手压在二维插画上方。
+  for(const lm of latestHands)eraseRealHand(vx,lm);
+  // 最后重画细窗边，避免手孔把边框一起擦掉
+  vx.save();vx.globalAlpha=S.portal;vx.strokeStyle='rgba(235,248,255,.92)';vx.lineWidth=Math.max(2,w*.0022);poly(vx,pts);vx.stroke();
+  vx.setLineDash([12,9]);vx.strokeStyle='rgba(69,220,255,.75)';vx.lineWidth=Math.max(1,w*.001);poly(vx,pts);vx.stroke();vx.restore();
+  // 手保持真人画面，不再用 21 点骨架伪造矢量轮廓。
+  // 实测骨架描边会在掌缘/拇指根产生肉刺，识别点一跳还会拉出横跨半屏的白棍；
+  // 参考视频的拉窗阶段本来就是真手压在二维条带上方，保留真手反而更接近原作。
 }
 
 /* ---------------------------------------------------------------- 渲染 */
@@ -2296,9 +2315,15 @@ window.__FORCE_CHEST_VIS__ = function(v){
 /* 传送窗测试钩子：注入任意四边形角点（视频 uv），模拟双手取景。
    quad 缺省是一个明显旋转的四边形 —— 轴对齐矩形测不出「任意四边形」是否真的生效。
    同时强制关掉全身战衣：全身开着的话「窗内 vs 窗外」没有对比，窗的断言全部永真。 */
+window.__VECTOR_MOVE_WINDOW__ = function(quad){
+  const q=quad||[[.08,.36],[.70,.33],[.74,.68],[.06,.71]];
+  for(let i=0;i<4;i++){S.winQ[i]=q[i].slice();S.winQS[i]=q[i].slice();}
+  drawVectorLayer();return window.__VECTOR_STATE__();
+};
 window.__VECTOR_STATE__ = ()=>({
   plateReady:gwenPlateReady,
   plateSize:gwenPlateReady?[gwenPlate.naturalWidth,gwenPlate.naturalHeight]:[0,0],
+  vectorRect:S.vectorRect.map(v=>+v.toFixed(2)),
   skin:S.skin, portal:+S.portal.toFixed(3), hands:latestHands.length
 });
 window.__VECTOR_REDRAW__ = function(withHands=true){
@@ -2310,6 +2335,8 @@ window.__VECTOR_TEST__ = function(quad){
   const q = quad || [[0.18,0.28],[0.82,0.25],[0.84,0.72],[0.16,0.75]];
   for(let i=0;i<4;i++){ S.winQ[i][0]=q[i][0]; S.winQ[i][1]=q[i][1]; S.winQS[i][0]=q[i][0]; S.winQS[i][1]=q[i][1]; }
   S.skin=1; S.portalTarget=1; S.portal=1; S.suitTarget=0; S.suit=0;
+  // 固定一张真人脸锚点，验证窗口移动时角色底图不跟着漂
+  S.eyeL=[.46,.31,0,1];S.eyeR=[.54,.31,0,1];S.faceSeen=performance.now()/1000;S.faceLock=true;
   // 两只标准 L 手，仅用于无摄像头截图验收；真人路径仍使用 hand_landmarker 的 21 点。
   function fakeHand(side){
     const cx=side<0?.18:.82, cy=.54, lm=Array.from({length:21},()=>({x:cx,y:cy}));
