@@ -237,7 +237,32 @@ const vectorCanvas = $('#vector');
 const vx = vectorCanvas.getContext('2d');
 const gwenPlate = new Image();
 let gwenPlateReady = false;
-gwenPlate.onload = ()=>{ gwenPlateReady = true; };
+/* 底图是 2752px，实际绘制宽度只有 1000~1800px。Canvas 2D 的 drawImage 缩小是
+   单次双线性抽样（没有 mipmap），0.37 倍直缩会把细线抽成走样噪点 —— 这正是
+   「实机看起来很糊」的主因之一。这里预先构建一条逐级折半的金字塔，绘制时选
+   不小于目标宽度的最近一级，把缩放比控制在 [0.5,1] 内，走样大幅下降。 */
+const gwenMips = [];
+function buildGwenMips(){
+  gwenMips.length = 0;
+  let src = gwenPlate, sw = gwenPlate.naturalWidth, sh = gwenPlate.naturalHeight;
+  gwenMips.push({c:gwenPlate, w:sw, h:sh});
+  while(sw > 340){
+    const nw = Math.max(1, Math.round(sw/2)), nh = Math.max(1, Math.round(sh/2));
+    const cv = document.createElement('canvas'); cv.width = nw; cv.height = nh;
+    const c2 = cv.getContext('2d');
+    c2.imageSmoothingEnabled = true; c2.imageSmoothingQuality = 'high';
+    c2.drawImage(src, 0, 0, nw, nh);
+    gwenMips.push({c:cv, w:nw, h:nh});
+    src = cv; sw = nw; sh = nh;
+  }
+}
+function gwenMipFor(targetW){
+  // 选「宽度 >= 目标」中最小的那一级；找不到就用原图。
+  let best = gwenMips[0];
+  for(const m of gwenMips) if(m.w >= targetW && m.w < best.w) best = m;
+  return best;
+}
+gwenPlate.onload = ()=>{ buildGwenMips(); gwenPlateReady = true; };
 gwenPlate.onerror = e=>{ console.error('格温矢量底图加载失败', e); };
 gwenPlate.src = './assets/gwen-vector-plate.png';
 const gl = canvas.getContext('webgl2', {antialias:false, premultipliedAlpha:false, preserveDrawingBuffer:true});
@@ -1393,7 +1418,7 @@ const S = {
   chest:[0.5,0.34], chestS:[0.5,0.34], chestVis:1, chestVisForce:null, debugMode:null,
   eyeL:[0,0,0,-1], eyeR:[0,0,0,-1], brow:[0,0], chin:[0,0],
   faceSeen:-99, faceLock:false, pinchCool:0, lastPinch:false, hasPlate:0,
-  vectorRect:[0,0,0,0],
+  vectorRect:[0,0,0,0], vectorMip:[0,0], plateW:0, plateXY:[0,0],
   p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1 }
 };
 
@@ -1873,19 +1898,33 @@ function eraseRealHand(ctx,lm){
   const dist=(a,b)=>Math.hypot(p[a][0]-p[b][0],p[a][1]-p[b][1]);
   const palm=Math.max(dist(5,17),dist(0,9),18);
   if(palm>vectorCanvas.width*.32 || palm<vectorCanvas.width*.012)return;
+  /* 挖孔必须**贴着**真手，宁小勿大。
+     旧版 lineWidth = palm*0.42 把每根手指挖成 palm 近一半宽的粗棍，
+     五指连成一片、掌面 6 点多边形又外扩，结果在插画上开出两个巨大孔洞，
+     孔里透出晃动的摄像头画面 —— 这是实机「糊」的第二个主因（静态截图里表现为黑棍）。
+     实测粗描边版窗内透明面积 3.34%，其中绝大部分是手指外扩出来的冗余。
+     现在按指节粗细分段收窄（根粗尖细），掌面也只取内侧点。 */
   ctx.save();ctx.globalCompositeOperation='destination-out';ctx.lineCap='round';ctx.lineJoin='round';
-  // 掌面先挖实心区域，再沿真实骨骼逐根挖手指；这里只做遮罩，不生成任何假轮廓。
-  ctx.fillStyle='#000';poly(ctx,[p[0],p[1],p[5],p[9],p[13],p[17]]);ctx.fill();
+  ctx.fillStyle='#000';ctx.strokeStyle='#000';
+  // 掌面：稍微内缩，避免把掌缘外的插画一起擦掉
+  const cx=(p[0][0]+p[5][0]+p[17][0])/3, cy=(p[0][1]+p[5][1]+p[17][1])/3;
+  const shrink=(q,k)=>[cx+(q[0]-cx)*k, cy+(q[1]-cy)*k];
+  poly(ctx,[p[0],p[1],p[5],p[9],p[13],p[17]].map(q=>shrink(q,.94)));ctx.fill();
   const fingers=[[0,1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16],[17,18,19,20]];
-  ctx.strokeStyle='#000';ctx.lineWidth=Math.max(9,palm*.42);
   for(const chain of fingers){
     let valid=true;for(let i=1;i<chain.length;i++)if(dist(chain[i-1],chain[i])>palm*.82)valid=false;
-    if(!valid)continue;ctx.beginPath();ctx.moveTo(...p[chain[0]]);for(let i=1;i<chain.length;i++)ctx.lineTo(...p[chain[i]]);ctx.stroke();
+    if(!valid)continue;
+    // 逐段收窄：根部 0.24*palm → 指尖 0.13*palm，接近真实手指宽度
+    for(let i=1;i<chain.length;i++){
+      const u=(i-1)/(chain.length-1);
+      ctx.lineWidth=Math.max(5,palm*(.24-.11*u));
+      ctx.beginPath();ctx.moveTo(...p[chain[i-1]]);ctx.lineTo(...p[chain[i]]);ctx.stroke();
+    }
   }
   ctx.restore();
 }
 function drawVectorLayer(){
-  if(!vx)return; const dpr=Math.min(devicePixelRatio||1,1.75), w=vectorCanvas.width, h=vectorCanvas.height;
+  if(!vx)return; const w=vectorCanvas.width, h=vectorCanvas.height;
   vx.clearRect(0,0,w,h);
   if(S.skin!==1 || S.portal<.015)return;
   const pts=S.winQS.map(p=>[(S.mirror?1-p[0]:p[0])*w,p[1]*h]);
@@ -1904,16 +1943,40 @@ function drawVectorLayer(){
       const eyeSpan=Math.max(Math.hypot(S.eyeR[0]-S.eyeL[0],S.eyeR[1]-S.eyeL[1]),.025);
       const screenX=(S.mirror?1-ex:ex)*w, screenY=ey*h;
       // 实测底图眼距约 0.165W；真人 landmark 瞳距对应面罩眼距约 1.9 倍
-      dw=Math.min(w*1.55,Math.max(w*.72,eyeSpan*w*1.9/.165));
+      let rawW=Math.min(w*1.55,Math.max(w*.72,eyeSpan*w*1.9/.165));
+      /* 关键：底图宽度绝不能逐帧跟着瞳距走。
+         实测瞳距抖 3%（MediaPipe 眼部 landmark 的常态噪声）→ dw 变 60px、dy 变 10px；
+         每帧一个不同的缩放比，重采样结果每帧都不一样，主观上就是「一团糊的、抖的东西」。
+         静态截图看不出来，只有实机连续帧能看出来 —— 这是「测试全绿但实机糊」的真因。
+         治法两层：① 宽度量化到 1/16 档（跨档才换尺寸，同档内像素完全一致）
+                  ② 档位切换和位置都做时域低通，避免噪声把档位来回踢。 */
+      const STEP=w/16;
+      /* 迟滞必须比较**原始宽度**与当前档，不能比较两个量化值：
+         量化会把 ±2% 的噪声放大成整档跳变，只要噪声跨过档边界就翻整个 STEP。
+         实测「比较量化值 + 0.62 阈值」仍有 137px 的帧间跳变（= 整整一档）。
+         改成 |raw - 当前档| > 0.72*STEP 才换档，噪声（约 0.3*STEP）永远踢不动它。 */
+      if(S.plateW<=0 || Math.abs(rawW-S.plateW)>STEP*0.72){
+        S.plateW=Math.round(rawW/STEP)*STEP;
+      }
+      dw=S.plateW;
       dh=dw*gwenPlate.naturalHeight/gwenPlate.naturalWidth;
-      dx=screenX-dw*.50; dy=screenY-dh*.31;
+      const tx=screenX-dw*.50, ty=screenY-dh*.31;
+      // 位置一阶低通（α 0.18）：跟得上真人移动，但滤掉 landmark 抖动
+      if(S.plateXY[0]===0 && S.plateXY[1]===0){ S.plateXY=[tx,ty]; }
+      else { S.plateXY[0]+=(tx-S.plateXY[0])*.18; S.plateXY[1]+=(ty-S.plateXY[1])*.18; }
+      dx=Math.round(S.plateXY[0]); dy=Math.round(S.plateXY[1]);
     }else{
       const scale=Math.max(rw/gwenPlate.naturalWidth,(rh+pad*.4)/gwenPlate.naturalHeight);
       dw=gwenPlate.naturalWidth*scale;dh=gwenPlate.naturalHeight*scale;
       dx=x0-pad+(rw-dw)/2;dy=y0-pad*.2+(rh+pad*.4-dh)*.34;
+      S.plateW=0; S.plateXY=[0,0];
     }
     S.vectorRect=[dx,dy,dw,dh];
-    vx.drawImage(gwenPlate,dx,dy,dw,dh);
+    // 先降到最近一级 mip 再画：把重采样比压进 [0.5,1]，避免大比例直缩的走样。
+    const mip=gwenMipFor(dw);
+    vx.imageSmoothingEnabled=true; vx.imageSmoothingQuality='high';
+    S.vectorMip=[mip.w,dw];
+    vx.drawImage(mip.c,0,0,mip.w,mip.h,dx,dy,dw,dh);
   }else{
     drawCyberCity(vx,x0-pad,y0-pad*.2,rw,rh+pad*.4);
     drawGwenPoster(vx,x0-pad,y0-pad*.2,rw,rh+pad*.4);
@@ -1935,8 +1998,19 @@ function drawVectorLayer(){
 /* ---------------------------------------------------------------- 渲染 */
 let t0 = performance.now()/1000, frames=0, fpsT=0, lastMPT=0, faceTick=0, lastProbeT=0;
 
+/* DPR 必须**精确**等于设备像素比，不能截断。
+   旧代码写 min(dpr,1.75)：Retina（dpr=2）上 backing store 只有 CSS 的 1.75 倍，
+   浏览器再把它拉到 2 倍物理像素显示 —— 1.143 倍非整数放大，是最糊的一种缩放。
+   实测 dpr=2 时高频细节（拉普拉斯 hiFrac）比 dpr=1 少 35%。
+   为控制超高分屏的填充率，只在像素总量过大时才整体降档（保持与物理像素同比例）。 */
+function renderDPR(){
+  const raw = window.devicePixelRatio || 1;
+  const px = innerWidth*raw * innerHeight*raw;
+  const CAP = 5.0e6; // 约 2560x1950，SwiftShader / 集显也能撑住
+  return px > CAP ? raw*Math.sqrt(CAP/px) : raw;
+}
 function resize(){
-  const dpr = Math.min(window.devicePixelRatio||1, 1.75);
+  const dpr = renderDPR();
   const w = Math.round(innerWidth*dpr), h = Math.round(innerHeight*dpr);
   if(canvas.width!==w || canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); }
   if(vectorCanvas.width!==w || vectorCanvas.height!==h){ vectorCanvas.width=w; vectorCanvas.height=h; }
@@ -2324,10 +2398,19 @@ window.__VECTOR_STATE__ = ()=>({
   plateReady:gwenPlateReady,
   plateSize:gwenPlateReady?[gwenPlate.naturalWidth,gwenPlate.naturalHeight]:[0,0],
   vectorRect:S.vectorRect.map(v=>+v.toFixed(2)),
+  vectorMip:S.vectorMip,
+  mipLevels:gwenMips.map(m=>m.w),
   skin:S.skin, portal:+S.portal.toFixed(3), hands:latestHands.length
 });
 window.__VECTOR_REDRAW__ = function(withHands=true){
   if(!withHands) latestHands=[];
+  drawVectorLayer();
+  return window.__VECTOR_STATE__();
+};
+/* 用给定瞳距（归一化）重画，用来量「角色底图是否随瞳距抖动而反复缩放」。 */
+window.__VECTOR_SET_EYES__ = function(sep, cx=0.50, cy=0.31){
+  S.eyeL=[cx-sep/2,cy,0,1]; S.eyeR=[cx+sep/2,cy,0,1];
+  S.faceSeen=performance.now()/1000; S.faceLock=true;
   drawVectorLayer();
   return window.__VECTOR_STATE__();
 };
