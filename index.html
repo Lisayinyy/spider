@@ -642,14 +642,21 @@ void main(){
   vec3 vecCol = camCol;
   float vecAmt = uVecMix * portal;
   if(uSkin==1 && vecAmt > 0.003){
-    vec2 px = 1.0 / max(uVidRes, vec2(1.0));
+    /* 采样步长必须按**屏幕**尺度算，不能按摄像头分辨率。
+       实测摄像头 1200x896 而画布 1000x700，用 1/uVidRes 时 R=3.2 的采样窗
+       在屏幕上只覆盖不到 3 个像素，Kuwahara 几乎没生效，画面里的「粉色方块
+       条纹」其实是 posterize 直接量化原始噪声产生的伪影 —— 纯色替换法实测：
+       关矢量化 pink=0.042 / 只跳过 posterize+描边 pink=0.081 / 完整 0.071，
+       且 suitAmt=0 完全不影响，证明它跟旧战衣无关。 */
+    vec2 px = 1.0 / max(uRes, vec2(1.0));
     vec2 st = vec2(svW.x, svW.y);
     float R = max(uVecRad, 1.0);
     // ① Kuwahara：四象限均值 + 方差，取方差最小者
     vec3 mA=vec3(0.0), mB=vec3(0.0), mC=vec3(0.0), mD=vec3(0.0);
     vec3 qA=vec3(0.0), qB=vec3(0.0), qC=vec3(0.0), qD=vec3(0.0);
     // 固定 4x4 采样窗（radius 用步长缩放），保证循环边界是常量、着色器可展开
-    const int K = 4;
+    // K=6 → 每象限 36 个采样点。K=4 时采样过稀，抹不平肤色渐变反而留下块状伪影。
+    const int K = 6;
     for(int j=0;j<K;j++){
       for(int i=0;i<K;i++){
         vec2 o = vec2(float(i), float(j)) * px * (R/float(K-1));
@@ -666,13 +673,51 @@ void main(){
     float vB = dot(abs(qB/nn - mB*mB), vec3(1.0));
     float vC = dot(abs(qC/nn - mC*mC), vec3(1.0));
     float vD = dot(abs(qD/nn - mD*mD), vec3(1.0));
-    vec3 flat3 = mA; float best = vA;
-    if(vB < best){ best = vB; flat3 = mB; }
-    if(vC < best){ best = vC; flat3 = mC; }
-    if(vD < best){ best = vD; flat3 = mD; }
-    // ② posterize：色阶量化成平色块
+    /* 四象限「硬选方差最小者」（if(v<best) flat3=mX）是原版 GPUImage 的做法，
+       但它在两个象限方差接近的地方会逐像素在两个均值之间来回跳 —— 这就是
+       色块边缘那圈锯齿毛刺的来源。改成**按方差倒数加权的软混合**：
+       方差明显小的象限权重压倒性大（q=8 次幂），方差接近时平滑过渡。
+       实测粗糙度指标（相邻像素亮度差>14 的占比）0.322 -> 见文件头基线表。 */
+    const float EPS = 1e-4;
+    float wA = pow(1.0/(vA + EPS), 8.0);
+    float wB = pow(1.0/(vB + EPS), 8.0);
+    float wC = pow(1.0/(vC + EPS), 8.0);
+    float wD = pow(1.0/(vD + EPS), 8.0);
+    float wS = wA + wB + wC + wD;
+    vec3 flat3 = (mA*wA + mB*wB + mC*wC + mD*wD) / max(wS, EPS);
+    /* ② posterize
+       在**线性 RGB 上均匀量化是错的**：真人肤色/头发的亮度大量落在低段，
+       floor(x*L) 会把整片暗部砸进同一档 -> 死黑一坨。实测 vecMix 0->1
+       画面 mean 从 64.4 掉到 23.3、dark 从 0.45 涨到 0.85，就是这个原因。
+       矢量插画的做法是：先把亮度重映射进「插画区间」（抬黑位、压白位、
+       整体提亮），再**只量化明度**、色相/饱和度保持连续。这样得到的是
+       明亮平色块，而不是一堆黑格子。 */
     float L = max(uVecLevels, 2.0);
-    vec3 post = floor(flat3 * L + 0.5) / L;
+    float lin = dot(flat3, vec3(0.2125,0.7154,0.0721));
+    // 亮度重映射：黑位抬到 0.16、白位压到 0.97，再走一次 gamma 0.78 提亮中调
+    float lo = 0.16, hi = 0.97;
+    float lm = pow(clamp(lin, 0.0, 1.0), 0.78);
+    lm = lo + (hi - lo) * lm;
+    /* 只量化明度。硬 floor 的档位边界会逐像素抖动 —— 归因实测（真人 ROI，
+       rough = 相邻像素亮度差>14 的占比）：
+         Kuwahara 单独          rough 0.082
+         + posterize            rough 0.205   <- 主凶，+0.123
+         + Sobel 描边           rough 0.287   <- 次之，+0.082
+       解法是**软量化**：在档位边界附近用 smoothstep 做一小段过渡，
+       而不是让相邻像素直接跨档。过渡宽度取 0.22 档（再宽就退化成没量化）。 */
+    float lp = lm * L;
+    float fi = floor(lp);
+    float fr = lp - fi;                       // 档内位置 0..1
+    float soft = smoothstep(0.5 - 0.11, 0.5 + 0.11, fr);
+    float lq = (fi + 0.62 + soft) / L;
+    lq = clamp(lq, lo, hi);
+    /* 色相/饱和保持连续：用色度（原色 - 灰）按新明度重新着色。
+       注意色度必须**按明度变化比例同步放大**：亮度从 lin 抬到 lq 之后，
+       原样搬过来的色度相对新亮度就被稀释了，画面读作灰绿而不是插画的明亮色。
+       再叠一个固定增益让色块更艳（矢量插画的色通常比照片饱和）。 */
+    float lift = lq / max(lin, 0.08);
+    vec3 chroma = (flat3 - vec3(lin)) * clamp(lift, 0.6, 2.6) * 1.55;
+    vec3 post = clamp(vec3(lq) + chroma, 0.0, 1.0);
     // ③ Sobel 描边：在**平滑后**的亮度上取梯度，避免噪点被当成边
     float gx = 0.0, gy = 0.0;
     for(int k=-1;k<=1;k++){
@@ -685,13 +730,16 @@ void main(){
       gy += wx * (lB - lT);
     }
     float mag = length(vec2(gx, gy));
-    // smoothstep 而不是 step：硬阈值会让描线随噪声闪烁
-    float ink = smoothstep(uVecEdge, uVecEdge*2.1, mag);
-    vec3 lineC = post * 0.14;   // 描边取本色压暗，比纯黑更像手绘
-    vecCol = mix(post, lineC, ink);
-    // 轻微提饱和，矢量插画的色块通常比照片更艳
-    float g2 = dot(vecCol, vec3(0.2125,0.7154,0.0721));
-    vecCol = clamp(mix(vec3(g2), vecCol, 1.28), 0.0, 1.0);
+    /* 描边只能落在**结构边界**上，不能描肤色的自然明暗渐变。
+       原来 uVecEdge=0.11 + 上界 2.1x 时真人脸上 darkFrac 到 0.77（77% 画面变暗）,
+       满脸黑斑。两处修正：
+       ① 阈值抬高、过渡带收窄（下界 uVecEdge、上界 1.35x）-> 只有强边吃满墨；
+       ② 描线不再压到 0.14 死黑，改成往「墨色」方向 mix 且保留本色，
+          并按 ink 强度限幅（弱边最多压 35%），避免大面积泛黑。 */
+    float ink = smoothstep(uVecEdge, uVecEdge*1.35, mag);
+    // 墨色取本色的暗调而非纯黑：手绘描线通常是深色但带本身色相
+    vec3 lineC = post * 0.30;
+    vecCol = mix(post, lineC, ink * 0.85);
     camCol = mix(camCol, vecCol, vecAmt);
   }
 
@@ -1493,7 +1541,7 @@ const S = {
   vecMode:'live',
   p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1,
      // 实时矢量化参数（Kuwahara 半径 / posterize 色阶 / Sobel 阈值）
-     vecMix:1, vecRad:3.2, vecLevels:6, vecEdge:0.11 }
+     vecMix:1, vecRad:5.0, vecLevels:6, vecEdge:0.14 }
 };
 
 /* ---------------------------------------------------------------- 摄像头 */
@@ -2592,6 +2640,28 @@ window.__VEC_FEED__ = function(){
   return true;
 };
 /* 设置矢量化强度并同步重绘一帧（不依赖主循环） */
+/* 用一张真实照片当摄像头纹理。合成的渐变方块能证明算法在跑，
+   但证明不了「真人看起来像矢量插画」—— 调参必须在真实人像上做。 */
+window.__VEC_FEED_IMG__ = function(){
+  const img = window.__FEED_IMG__;
+  if(!img) throw new Error('先设置 window.__FEED_IMG__');
+  S.running = false;
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texCam);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  vidW = img.naturalWidth; vidH = img.naturalHeight;
+  S.skin=1; S.portal=1; S.portalTarget=1; S.suit=0; S.suitTarget=0;
+  // 窗开得大一些，让整张脸都在窗内
+  const q=[[0.06,0.08],[0.94,0.08],[0.94,0.94],[0.06,0.94]];
+  for(let i=0;i<4;i++){ S.winQ[i]=q[i].slice(); S.winQS[i]=q[i].slice(); }
+  return [vidW, vidH];
+};
+/* 任意调 S.p 参数（S 是模块作用域，Playwright 的 evaluate 读不到，必须走钩子） */
+window.__VEC_PARAM__ = function(patch){
+  Object.assign(S.p, patch||{});
+  drawFrame();
+  return JSON.parse(JSON.stringify(S.p));
+};
 window.__VEC_SET__ = function(mix, levels, rad, edge){
   S.p.vecMix = mix;
   if(levels!==undefined) S.p.vecLevels = levels;
