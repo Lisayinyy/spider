@@ -17,7 +17,7 @@ with sync_playwright() as p:
  # 真机是 Retina：必须在 dpr=2 下验收，dpr=1 会掩盖非整数拉伸与抖动问题
  pg=b.new_context(viewport={'width':1100,'height':700},device_scale_factor=2).new_page();errs=[];pg.on('pageerror',lambda e:errs.append(str(e)))
  pg.goto(f'http://127.0.0.1:{PORT}/index.html',wait_until='domcontentloaded');pg.wait_for_timeout(1400)
- pg.evaluate("()=>document.querySelector('#boot').classList.add('hide')");pg.evaluate('()=>window.__VECTOR_TEST__()');pg.wait_for_timeout(250)
+ pg.evaluate("()=>document.querySelector('#boot').classList.add('hide')");pg.evaluate("()=>window.__VECTOR_TEST__(null,'plate')");pg.wait_for_timeout(250)
  state=pg.evaluate('()=>window.__VECTOR_STATE__()')
  with_holes=pg.evaluate(JS)
  pg.evaluate('()=>window.__VECTOR_REDRAW__(false)');pg.wait_for_timeout(80)
@@ -32,7 +32,7 @@ with sync_playwright() as p:
                      "ch:document.querySelector('#vector').height,iw:innerWidth,ih:innerHeight})")
  dprExact=abs(dprInfo['cw']-dprInfo['iw']*dprInfo['dpr'])<=1 and abs(dprInfo['ch']-dprInfo['ih']*dprInfo['dpr'])<=1
  # (2) 静止的人 + landmark 噪声 → 底图尺寸/位置必须完全不动
- pg.evaluate('()=>window.__VECTOR_TEST__()');pg.wait_for_timeout(120)
+ pg.evaluate("()=>window.__VECTOR_TEST__(null,'plate')");pg.wait_for_timeout(120)
  jw=[];jy=[]
  for _ in range(40):
    _s=pg.evaluate('(v)=>window.__VECTOR_SET_EYES__(v)',0.080*(1+_rnd.uniform(-0.02,0.02)))
@@ -48,7 +48,7 @@ with sync_playwright() as p:
  pg1=b.new_context(viewport={'width':1100,'height':700},device_scale_factor=1).new_page()
  pg1.goto(f'http://127.0.0.1:{PORT}/index.html',wait_until='domcontentloaded');pg1.wait_for_timeout(1400)
  pg1.evaluate("()=>document.querySelector('#boot').classList.add('hide')")
- pg1.evaluate('()=>window.__VECTOR_TEST__()');pg1.wait_for_timeout(200)
+ pg1.evaluate("()=>window.__VECTOR_TEST__(null,'plate')");pg1.wait_for_timeout(200)
  mst=pg1.evaluate('()=>window.__VECTOR_STATE__()')
  mipW,drawW=mst['vectorMip']
  mipRatio=drawW/mipW if mipW else 0

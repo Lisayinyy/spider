@@ -279,7 +279,11 @@ in vec2 vUv; out vec4 outColor;
 uniform sampler2D uCam;     // 摄像头
 uniform sampler2D uMask;    // 人体 mask (R = 置信度)
 uniform sampler2D uPlate;   // 可选背景板 / 上传图
-uniform sampler2D uRows;    // 1x64 逐行躯干轴: R=中心x, G=半宽, B=该行有效
+uniform sampler2D uRows;
+uniform float uVecMix;      // 矢量化混合强度 0..1
+uniform float uVecRad;      // Kuwahara 采样半径（像素）
+uniform float uVecLevels;   // posterize 色阶数
+uniform float uVecEdge;     // Sobel 描边阈值
 uniform int   uHasPlate;
 
 uniform vec2  uRes;         // canvas 像素
@@ -621,9 +625,75 @@ void main(){
   float winEdge = exp(-pow(abs(wd)/0.012, 2.0));
   float portal = uPortal * winIn;
 
-  // 格温的传送窗由上层 2D 矢量插画完整接管。WebGL 这一层只保留摄像头，
-  // 不再把真人 mask 涂成旧战衣，否则四边形边缘抗锯齿时会露出方肩火柴人。
-  float vectorPortal = (uSkin==1) ? portal : 0.0;
+  /* plate 模式下窗内交给上层 2D 静态底图，这里要把战衣扣掉（否则四边形边缘
+     抗锯齿时露出方肩火柴人）。live 模式下窗内是本层的实时矢量化真人 + 战衣，
+     必须**保留** suitZone，否则窗内只剩没有战衣的矢量化路人。 */
+  float vectorPortal = (uSkin==1 && uVecMix < 0.5) ? portal : 0.0;
+
+  /* 实时矢量化：把真人摄像头画面变成平色块 + 描边的矢量插画。
+     这是参考视频真正的做法 —— 角色跟着人实时动，而不是盖一张固定底图。
+     算法链（GPUImage2 / Kyprianidis et al. "Anisotropic Kuwahara Filtering
+     on the GPU", GPU Pro 2010）：
+       ① Kuwahara 保边平滑：取四个象限里方差最小的那个的均值，
+          既把皮肤/衣服抹成平色块，又不像高斯模糊那样把轮廓一起糊掉；
+       ② posterize 色阶量化：floor(c*L+0.5)/L，把连续渐变压成有限个色阶；
+       ③ Sobel 描边：梯度超过阈值的地方压黑，产生手绘描线。
+     只在格温皮肤（uSkin==1）且传送窗内启用，其它皮肤保持写实摄像头画面。 */
+  vec3 vecCol = camCol;
+  float vecAmt = uVecMix * portal;
+  if(uSkin==1 && vecAmt > 0.003){
+    vec2 px = 1.0 / max(uVidRes, vec2(1.0));
+    vec2 st = vec2(svW.x, svW.y);
+    float R = max(uVecRad, 1.0);
+    // ① Kuwahara：四象限均值 + 方差，取方差最小者
+    vec3 mA=vec3(0.0), mB=vec3(0.0), mC=vec3(0.0), mD=vec3(0.0);
+    vec3 qA=vec3(0.0), qB=vec3(0.0), qC=vec3(0.0), qD=vec3(0.0);
+    // 固定 4x4 采样窗（radius 用步长缩放），保证循环边界是常量、着色器可展开
+    const int K = 4;
+    for(int j=0;j<K;j++){
+      for(int i=0;i<K;i++){
+        vec2 o = vec2(float(i), float(j)) * px * (R/float(K-1));
+        vec3 a = texture(uCam, st + vec2(-o.x,-o.y)).rgb; mA+=a; qA+=a*a;
+        vec3 b = texture(uCam, st + vec2( o.x,-o.y)).rgb; mB+=b; qB+=b*b;
+        vec3 c2= texture(uCam, st + vec2( o.x, o.y)).rgb; mC+=c2;qC+=c2*c2;
+        vec3 d = texture(uCam, st + vec2(-o.x, o.y)).rgb; mD+=d; qD+=d*d;
+      }
+    }
+    float nn = float(K*K);
+    mA/=nn; mB/=nn; mC/=nn; mD/=nn;
+    // 方差 = E[x^2] - E[x]^2，三通道求和作为该象限的「杂乱度」
+    float vA = dot(abs(qA/nn - mA*mA), vec3(1.0));
+    float vB = dot(abs(qB/nn - mB*mB), vec3(1.0));
+    float vC = dot(abs(qC/nn - mC*mC), vec3(1.0));
+    float vD = dot(abs(qD/nn - mD*mD), vec3(1.0));
+    vec3 flat3 = mA; float best = vA;
+    if(vB < best){ best = vB; flat3 = mB; }
+    if(vC < best){ best = vC; flat3 = mC; }
+    if(vD < best){ best = vD; flat3 = mD; }
+    // ② posterize：色阶量化成平色块
+    float L = max(uVecLevels, 2.0);
+    vec3 post = floor(flat3 * L + 0.5) / L;
+    // ③ Sobel 描边：在**平滑后**的亮度上取梯度，避免噪点被当成边
+    float gx = 0.0, gy = 0.0;
+    for(int k=-1;k<=1;k++){
+      float wx = (k==0) ? 2.0 : 1.0;
+      float lL = dot(texture(uCam, st + vec2(-px.x*R, px.y*R*float(k))).rgb, vec3(0.2125,0.7154,0.0721));
+      float lR = dot(texture(uCam, st + vec2( px.x*R, px.y*R*float(k))).rgb, vec3(0.2125,0.7154,0.0721));
+      float lT = dot(texture(uCam, st + vec2( px.x*R*float(k),-px.y*R)).rgb, vec3(0.2125,0.7154,0.0721));
+      float lB = dot(texture(uCam, st + vec2( px.x*R*float(k), px.y*R)).rgb, vec3(0.2125,0.7154,0.0721));
+      gx += wx * (lR - lL);
+      gy += wx * (lB - lT);
+    }
+    float mag = length(vec2(gx, gy));
+    // smoothstep 而不是 step：硬阈值会让描线随噪声闪烁
+    float ink = smoothstep(uVecEdge, uVecEdge*2.1, mag);
+    vec3 lineC = post * 0.14;   // 描边取本色压暗，比纯黑更像手绘
+    vecCol = mix(post, lineC, ink);
+    // 轻微提饱和，矢量插画的色块通常比照片更艳
+    float g2 = dot(vecCol, vec3(0.2125,0.7154,0.0721));
+    vecCol = clamp(mix(vec3(g2), vecCol, 1.28), 0.0, 1.0);
+    camCol = mix(camCol, vecCol, vecAmt);
+  }
 
   // 战衣作用域：全身开关 ∪ 窗内；格温 portal 从这里扣掉，只留全身 F 兼容旧玩法
   float suitZone = clamp(max(uSuit, portal - vectorPortal), 0.0, 1.0);
@@ -1419,7 +1489,11 @@ const S = {
   eyeL:[0,0,0,-1], eyeR:[0,0,0,-1], brow:[0,0], chin:[0,0],
   faceSeen:-99, faceLock:false, pinchCool:0, lastPinch:false, hasPlate:0,
   vectorRect:[0,0,0,0], vectorMip:[0,0], plateW:0, plateXY:[0,0],
-  p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1 }
+  // 'live' = 窗内实时矢量化真人；'plate' = 盖静态 AI 插画底图（兜底/对照）
+  vecMode:'live',
+  p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1,
+     // 实时矢量化参数（Kuwahara 半径 / posterize 色阶 / Sobel 阈值）
+     vecMix:1, vecRad:3.2, vecLevels:6, vecEdge:0.11 }
 };
 
 /* ---------------------------------------------------------------- 摄像头 */
@@ -1931,6 +2005,19 @@ function drawVectorLayer(){
   const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
   const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
   const pad=Math.max(30,(x1-x0)*.08), rw=(x1-x0)+pad*2, rh=Math.max((y1-y0)+pad*.35,rw*.40);
+  /* 两种窗内表现：
+     - live（默认）：窗内交给 WebGL 的**实时矢量化**（Kuwahara + posterize + Sobel），
+       真人动它就动，这才是参考视频的做法。2D 层只负责窗边，绝不盖住画面。
+     - plate：盖一张 AI 生成的静态插画底图。姿势固定、不跟人动，只作为兜底/对照保留。
+     之前默认走 plate，导致窗内永远是死图 —— 实时矢量化即使已经在算，也被完全盖掉。 */
+  if(S.vecMode==='live'){
+    vx.save();vx.globalAlpha=S.portal;
+    vx.strokeStyle='rgba(235,248,255,.92)';vx.lineWidth=Math.max(2,w*.0022);poly(vx,pts);vx.stroke();
+    vx.setLineDash([12,9]);vx.strokeStyle='rgba(69,220,255,.75)';vx.lineWidth=Math.max(1,w*.001);
+    poly(vx,pts);vx.stroke();vx.restore();
+    S.vectorRect=[0,0,0,0];
+    return;
+  }
   vx.save();vx.globalAlpha=Math.min(1,S.portal*1.18);poly(vx,pts);vx.clip();
   if(gwenPlateReady){
     /* 底图锁定真人脸，而不是跟着窗口缩放。
@@ -2048,6 +2135,17 @@ function loop(){
   const shockAge = shockT0 < 0 ? -1 : (now - shockT0);
   if(shockAge > 2.4) shockT0 = -1;
 
+  drawFrame(t, shockAge);
+  window.__FRAMES__ = (window.__FRAMES__||0)+1;
+  hudTick(now);
+}
+
+/* 一帧的 uniform 上传 + 绘制。抽成独立函数，测试钩子可以在主循环停掉的
+   情况下自己驱动一帧（否则 uploadCam 每帧覆盖注入纹理，读到的都是假图）。 */
+function drawFrame(t, shockAge){
+  if(!gl || !prog) return;
+  t = (t===undefined) ? (performance.now()/1000 - t0) : t;
+  shockAge = (shockAge===undefined) ? -1 : shockAge;
   // ---- uniforms ----
   gl.uniform1i(u('uCam'),0); gl.uniform1i(u('uMask'),1); gl.uniform1i(u('uPlate'),2);
   gl.uniform1i(u('uRows'),3);
@@ -2076,12 +2174,18 @@ function loop(){
   gl.uniform1f(u('uCyber'), p.cyber);
   gl.uniform1f(u('uGloss'), p.gloss);
   gl.uniform1f(u('uHood'), p.hood);
+  gl.uniform1f(u('uVecMix'), p.vecMix);
+  gl.uniform1f(u('uVecRad'), p.vecRad);
+  gl.uniform1f(u('uVecLevels'), p.vecLevels);
+  gl.uniform1f(u('uVecEdge'), p.vecEdge);
   gl.uniform1i(u('uSkin'), S.skin);
   gl.uniform1i(u('uDebug'), S.debugMode !== null ? S.debugMode : (S.debug?1:0));
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   drawVectorLayer();
-  window.__FRAMES__ = (window.__FRAMES__||0)+1;
+}
+
+function hudTick(now){
 
   // ---- HUD ----
   frames++;
@@ -2267,6 +2371,12 @@ addEventListener('keydown', e=>{
   else if(k==='i') $('#bDiag').click();
   else if(k==='h') $('#pHead').click();
   else if(k==='1'||k==='2'||k==='3') setSkin(parseInt(k,10)-1);
+  // V：切换窗内表现 —— live（实时矢量化真人）↔ plate（静态 AI 插画底图）
+  else if(k==='v'){
+    S.vecMode = (S.vecMode==='live') ? 'plate' : 'live';
+    const m = $('#modeTxt');
+    if(m) m.textContent = S.vecMode==='live' ? '实时矢量 · LIVE' : '静态底图 · PLATE';
+  }
 });
 
 $('#go').addEventListener('click', async ()=>{
@@ -2414,8 +2524,11 @@ window.__VECTOR_SET_EYES__ = function(sep, cx=0.50, cy=0.31){
   drawVectorLayer();
   return window.__VECTOR_STATE__();
 };
-window.__VECTOR_TEST__ = function(quad){
+window.__VECTOR_TEST__ = function(quad, mode){
   const q = quad || [[0.18,0.28],[0.82,0.25],[0.84,0.72],[0.16,0.75]];
+  // 默认运行模式是 live（窗内实时矢量化）。底图相关断言必须显式传 'plate'，
+  // 否则它们测的是一条根本不再默认启用的路径。
+  S.vecMode = mode || 'live';
   for(let i=0;i<4;i++){ S.winQ[i][0]=q[i][0]; S.winQ[i][1]=q[i][1]; S.winQS[i][0]=q[i][0]; S.winQS[i][1]=q[i][1]; }
   S.skin=1; S.portalTarget=1; S.portal=1; S.suitTarget=0; S.suit=0;
   // 固定一张真人脸锚点，验证窗口移动时角色底图不跟着漂
@@ -2448,6 +2561,45 @@ window.__PORTAL_STATE__ = () => ({
 });
 /* 手势级注入：伪造 landmarks 走真实 onGesture 管线（迟滞/跳变/平滑都在被测路径上） */
 window.__GESTURE_TEST__ = (list) => { onGesture(list); return window.__PORTAL_STATE__(); };
+
+/* ---- 矢量化验收钩子 ----
+   注意：相机循环每帧都会 uploadCam() 覆盖 texCam，所以注入测试纹理必须
+   先把 S.running 关掉、并自己驱动一次绘制，否则读到的永远是被覆盖后的图。 */
+window.__VEC_FEED__ = function(){
+  S.running = false;                 // 停掉主循环，避免 uploadCam 覆盖注入纹理
+  // 造一张有连续渐变 + 高频细节的图：矢量化如果生效，渐变会被压成色阶
+  const N = 512, cv = document.createElement('canvas');
+  cv.width = cv.height = N;
+  const c2 = cv.getContext('2d');
+  const g = c2.createLinearGradient(0,0,N,N);
+  g.addColorStop(0,'#2b3f6e'); g.addColorStop(.5,'#d9a06b'); g.addColorStop(1,'#f2e4d0');
+  c2.fillStyle = g; c2.fillRect(0,0,N,N);
+  // 一个人形色块 + 若干细线，用来产生 Sobel 描边
+  c2.fillStyle = '#e8c9a6';
+  c2.beginPath(); c2.ellipse(N*.5, N*.36, N*.13, N*.16, 0, 0, Math.PI*2); c2.fill();
+  c2.fillStyle = '#3a2f4d';
+  c2.fillRect(N*.34, N*.52, N*.32, N*.40);
+  c2.strokeStyle = '#8fd9ff'; c2.lineWidth = 2;
+  for(let i=0;i<26;i++){ c2.beginPath(); c2.moveTo(0, i*N/26); c2.lineTo(N, i*N/26 + 18); c2.stroke(); }
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texCam);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+  // 让 uVidRes 与注入纹理一致，否则 Kuwahara 的像素步长算错
+  vidW = N; vidH = N;
+  S.skin = 1; S.portal = 1; S.portalTarget = 1; S.suit = 0; S.suitTarget = 0;
+  for(let i=0;i<4;i++){ S.winQ[i]=[[0.12,0.16],[0.88,0.16],[0.88,0.86],[0.12,0.86]][i].slice();
+                        S.winQS[i]=S.winQ[i].slice(); }
+  return true;
+};
+/* 设置矢量化强度并同步重绘一帧（不依赖主循环） */
+window.__VEC_SET__ = function(mix, levels, rad, edge){
+  S.p.vecMix = mix;
+  if(levels!==undefined) S.p.vecLevels = levels;
+  if(rad!==undefined) S.p.vecRad = rad;
+  if(edge!==undefined) S.p.vecEdge = edge;
+  drawFrame();
+  return {vecMix:S.p.vecMix, vecLevels:S.p.vecLevels, vecRad:S.p.vecRad, vecEdge:S.p.vecEdge};
+};
 $('#boot') && (window.__BOOT_VISIBLE__ = ()=> !$('#boot').classList.contains('hide'));
 </script>
 </body>
