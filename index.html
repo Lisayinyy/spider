@@ -1406,6 +1406,14 @@ void main(){
   // uDebug==7：suit（战衣显现程度）探针。粉块几何满值却在成品里没色时，
   // 元凶通常是最终合成 col = mix(bgCol, shade, suit) 里 suit 偏低把战衣稀释掉。
   if(uDebug==5){ outColor = vec4(0.0, headDbg, 0.0, 1.0); return; }  // 头颈区（兜帽面积比的分母）
+  /* uDebug==6：斜带空间闸门探针。portal 输出成纯绿、vecAmt 输出成纯红。
+     "带外有没有被污染"这个问题不能靠数成品像素回答 —— 背景动画/边光/城市霓虹
+     在带外本来就会变，读出的差值分不清是矢量化泄漏还是别的层在动。
+     直接读闸门值：带外 portal 必须是 0，那么 vecAmt = uVecMix*portal 也必须是 0。 */
+  if(uDebug==6){
+    outColor = vec4(vecAmt, portal, 0.0, 1.0);
+    return;
+  }
   if(uDebug==7){
     outColor = vec4(0.0, suit, 0.0, 1.0);
     return;
@@ -2797,6 +2805,15 @@ window.__VEC_PARAM__ = function(patch){
   Object.assign(S.p, patch||{});
   drawFrame();
   return JSON.parse(JSON.stringify(S.p));
+};
+/* 固定时间重绘一帧。uTime 驱动背景动画/边光呼吸/蛛丝流动，而 drawFrame() 不传参时
+   t 取 performance.now()/1000-t0 —— 两次测量之间时间在走，画面本来就不一样。
+   探针要比较"开/关某个参数"的差异时，必须用同一个 t 重绘，否则读出的差值里混着
+   时间动画。实测教训：不锁时间时，斜带**外**的 mean 也会读出 +15.26 的假污染
+   （portal 在带外恒为 0，矢量化不可能泄漏到那里）。 */
+window.__DRAW_AT__ = function(t){
+  drawFrame((t === undefined) ? 3.0 : t, -1);
+  return t;
 };
 window.__VEC_SET__ = function(mix, levels, rad, edge){
   S.p.vecMix = mix;

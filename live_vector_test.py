@@ -180,6 +180,58 @@ with sync_playwright() as p:
     toon = meas(vecStyle=0, vecLevels=6, vecEdge=0.14)  # toon filter 档
     meas(); pg.screenshot(path='/tmp/live_vec_cel.png')
 
+    # ---------- ④ 带内**背景**是否一起被矢量化（参考视频三件套的第三件）----------
+    # 用户明确选的是「横向斜带 + 赛璐璐 + **带内连背景一起换**」。前两件由上面
+    # 的几何/风格断言覆盖，这一件必须单独证明：矢量化写在 camCol（整幅相机图）
+    # 上而不是只在 body mask 内，所以斜带内的背景也该变。
+    #
+    # ★ 顺序陷阱（实测踩过）：__VEC_FEED_IMG__ 内部会把 winQ/winQS 覆写成几乎
+    #   全屏的 [[.06,.08],[.94,.08],[.94,.94],[.06,.94]]（原意"让整张脸都在窗内"）。
+    #   若先摆斜带再 feed，斜带被冲掉、portal 全屏恒为 1，会读出"斜带外也变了"
+    #   的假污染。必须 feed 在前、摆斜带在后。
+    # ★ 且 feed 之后 S.running=false，loop() 不再把 winQ 拷进 winQS，
+    #   所以要用 __VECTOR_MOVE_WINDOW__ 显式同步上传缓冲。
+    pg.evaluate('(qq)=>window.__VECTOR_MOVE_WINDOW__(qq)', q)
+    pg.wait_for_timeout(200)
+
+    # ROI 依据实测斜带 quad（x -0.405..1.445 / y 0.273..0.594，贯穿且厚 0.26H）：
+    #   BG_IN  = 横向最左边缘 + 斜带纵向范围内 -> 背景且在带内
+    #   BG_OUT = 同一横向位置 + 斜带下方       -> 背景且在带外（证明变化有边界）
+    # testface.png 是半身像，人体集中在横向 0.30~0.70，左边缘 0.02~0.13 是背景。
+    BG_IN, BG_OUT = [.02, .32, .13, .55], [.02, .72, .13, .92]
+
+    def bmeas(roi, **patch):
+        qq = dict(CEL); qq.update(patch)
+        pg.evaluate('(p)=>window.__VEC_PARAM__(p)', qq)
+        pg.evaluate('()=>window.__DRAW_AT__(3.0)')
+        pg.wait_for_timeout(120)
+        return pg.evaluate(STAT, roi)
+
+    bg_in_off, bg_in_on = bmeas(BG_IN, vecMix=0), bmeas(BG_IN, vecMix=1)
+    bg_out_off, bg_out_on = bmeas(BG_OUT, vecMix=0), bmeas(BG_OUT, vecMix=1)
+
+    # 闸门探针 uDebug==6（R=vecAmt, G=portal）：直接读空间闸门，不数成品像素。
+    # "带外有没有被污染"数像素答不了 —— 背景动画/边光/霓虹在带外本来就会动。
+    pg.evaluate('(p)=>window.__VEC_PARAM__(p)', dict(CEL, vecMix=1))
+    pg.evaluate('()=>window.__DBG_MODE__(6)')
+    pg.evaluate('()=>window.__DRAW_AT__(3.0)')
+    pg.wait_for_timeout(120)
+    GATE = r'''(r)=>{
+     const c=document.querySelector('canvas'),w=c.width,h=c.height;
+     const t=document.createElement('canvas');t.width=w;t.height=h;
+     t.getContext('2d').drawImage(c,0,0);
+     const x0=Math.floor(r[0]*w),y0=Math.floor(r[1]*h),x1=Math.floor(r[2]*w),y1=Math.floor(r[3]*h);
+     const d=t.getContext('2d').getImageData(x0,y0,x1-x0,y1-y0).data;
+     let sr=0,mr=0,sg=0,mg=0,n=0;
+     for(let i=0;i<d.length;i+=4){ sr+=d[i]; mr=Math.max(mr,d[i]);
+                                   sg+=d[i+1]; mg=Math.max(mg,d[i+1]); n++; }
+     return {vec_mean:+(sr/n/255).toFixed(4), vec_max:+(mr/255).toFixed(4),
+             portal_mean:+(sg/n/255).toFixed(4), portal_max:+(mg/255).toFixed(4)};
+    }'''
+    gate_in = pg.evaluate(GATE, BG_IN)
+    gate_out = pg.evaluate(GATE, BG_OUT)
+    pg.evaluate('()=>window.__DBG_MODE__(0)')
+
     checks = {
         'shader_compiles': bool(shader_ok) and not shader_err,
 
@@ -265,6 +317,27 @@ with sync_playwright() as p:
                          and abs(toon['ink'] - cel['ink']) > 0.10
                          and abs(toon['darkFrac'] - cel['darkFrac']) > 0.10,
 
+        # --- 带内背景一起换（参考视频三件套第三件）---
+        # ⑪ 斜带内的**背景**（人体之外）必须也被矢量化。
+        #    实测 mean 146.7 -> 180.0（Δ+33.3）、rough 0.000 -> 0.222、uniq 16 -> 30。
+        #    背景变化幅度甚至大于人脸（Δ+23.5），因为纯色墙被 DoG/色阶重新塑形。
+        #    rough 从 0（原片这块是纯色渐变）涨到 0.222 是最硬的证据。
+        'band_bg_vectorized': bg_in_on['rough'] > bg_in_off['rough'] + 0.08
+                              and bg_in_on['mean'] > bg_in_off['mean'] + 15,
+        # ⑫ 斜带**外**必须一个像素都不动。实测 Δmean = +0.00、uniq 32 -> 32。
+        #    这条防的是"整幅画面都矢量化了"冒充"背景一起换"。
+        'outside_band_bg_untouched': abs(bg_out_on['mean'] - bg_out_off['mean']) < 1.0
+                                     and bg_out_on['uniq'] == bg_out_off['uniq'],
+        # ⑬ 闸门本身必须有边界（不数像素，直接读闸门值）。
+        #    实测 带内 vecAmt 1.0000 / 带外 0.0000。
+        #    这条独立于上面两条的像素判据 —— 像素相同也可能是"两块都没渲染"。
+        #    ★ 必须读 vecAmt（红通道）而不是 portal（绿通道）：vecAmt = uVecMix*portal
+        #    才是真正决定"这个像素会不会被矢量化"的量。第一版读 portal，
+        #    破坏对照把 vecAmt 改成 uVecMix（去掉闸门）时这条照样绿 —— 它守的
+        #    根本不是自己声称的东西。
+        'band_gate_has_boundary': gate_in['vec_mean'] > 0.95
+                                  and gate_out['vec_max'] < 0.02,
+
         'no_pageerror': not errs,
     }
     out = {
@@ -273,6 +346,9 @@ with sync_playwright() as p:
                  'portal_target': band['target']},
         'synth': {'off_in': off_in, 'on_in': on_in,
                   'off_out': off_out, 'on_out': on_out, 'plate_area': plate_area},
+        'band_bg': {'in_off': bg_in_off, 'in_on': bg_in_on,
+                    'out_off': bg_out_off, 'out_on': bg_out_on,
+                    'gate_in': gate_in, 'gate_out': gate_out},
         'face': {k: {kk: (round(vv, 4) if isinstance(vv, float) else vv)
                      for kk, vv in v.items()}
                  for k, v in [('raw', raw), ('cel', cel), ('cel_noedge', cel_noedge),

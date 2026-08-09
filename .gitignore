@@ -11,3 +11,4 @@ shots/
 .DS_Store
 __pycache__/
 *.pyc
+probe_bg.py
