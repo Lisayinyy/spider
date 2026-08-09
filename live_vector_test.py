@@ -48,7 +48,18 @@ toon filter（uVecStyle=0）：
    → 赛璐璐必须自己有暗档：黑位 0.16→0.05、gamma 0.78→1.00。
 
 破坏对照记录见文件末 DAMAGE 注释。
-算法来源：GPUImage2 ToonFilter / KuwaharaFilter（Kyprianidis et al., GPU Pro 2010）。
+算法来源：
+- Kuwahara 保边平滑 + posterize：GPUImage2 KuwaharaFilter / ToonFilter
+  （Kyprianidis, Kang, Doellner, "Anisotropic Kuwahara Filtering on the GPU",
+   GPU Pro p.247, 2010）
+- DoG 单侧线条加深：bloc97/Anime4K v3.2（MIT, 21k star）
+  glsl/Experimental-Effects/Anime4K_Darken_HQ.glsl
+  核心是 min(luma - gaussianBlur(luma), 0.0) 后直接加回 RGB。
+  min(...,0) 只保留"比周围暗"的一侧 —— Sobel 的 length(gradient) 无符号，
+  一条边两侧都会被描，这正是旧版"满脸黑斑"（darkFrac 0.77）的根因。
+  实测 DoG 强度拉到默认的 5 倍，darkFrac 也只从 0.422 到 0.460。
+- 线条细化（未采用，备选）：Anime4K_Thin_HQ.glsl，沿 Sobel 梯度方向
+  做 UV 位移 pos -= normalize(grad)*px*strength，把粗线往中心收细。
 统计全部在页面内完成，只回传数字（整幅像素数组回传 Python 会超时）。
 """
 import threading, http.server, socketserver, functools, json, sys, os
@@ -164,6 +175,8 @@ with sync_playwright() as p:
     cel_r5 = meas(vecEdge=9.0, vecRad=5.0)
     cel_l2 = meas(vecEdge=9.0, vecLevels=2)             # posterize 孤立
     cel_l16 = meas(vecEdge=9.0, vecLevels=16)
+    cel_nodog = meas(dogStr=0.0)                        # 关 DoG 单侧加深
+    cel_doghi = meas(dogStr=4.0)                        # DoG 拉满
     toon = meas(vecStyle=0, vecLevels=6, vecEdge=0.14)  # toon filter 档
     meas(); pg.screenshot(path='/tmp/live_vec_cel.png')
 
@@ -193,13 +206,20 @@ with sync_playwright() as p:
         #    L=2 时暗档消失（实测 dark=0），所以这条能抓住"阴影被抹平"。
         'cel_keeps_shadow': cel['darkFrac'] > 0.30,
         # ③ 色块必须合并
-        'cel_colors_merged': cel['uniq'] < raw['uniq'] * 0.85,
+        # DoG 画的线自己会带来色阶（uniq 105->162），所以"色块合并"这条
+        # 必须在**关掉 DoG**的条件下测色块本身的合并程度，否则测的是线不是块。
+        'cel_colors_merged': cel_nodog['uniq'] < raw['uniq'] * 0.85,
         # ④ 色块必须比原片更平整（赛璐璐的核心观感）
-        'cel_flatter_than_raw': cel['rough'] < raw['rough'] * 0.85,
+        # 同理，色块平整度也要在关掉 DoG 时测（实测 .108 vs 原片 .183）。
+        # 而开着 DoG 的成品也不能比原片更毛刺 —— 这条单独守住（.162 < .183）。
+        'cel_flatter_than_raw': cel_nodog['rough'] < raw['rough'] * 0.75,
+        'cel_final_not_rougher_than_raw': cel['rough'] < raw['rough'],
         # ④b 软量化的牙齿只在 toon 档测得到 —— 赛璐璐的 qSoft 本来就只有 0.035
         #     （接近硬台阶，那正是它想要的刀切色块），把它置 0 对赛璐璐
         #     rough 只从 0.134 动到 0.129，任何合理阈值都抓不住。
         #     实测 toon 档：qSoft 0.11 -> rough 0.179，置 0 -> rough 0.199。
+        # 软量化的牙齿只在 toon 档测得到（赛璐璐 qSoft 本来就是 0.035）。
+        # toon 档不叠 DoG，实测 qSoft 0.11 -> rough 0.179，置 0 -> 0.199。
         'toon_soft_quantization_helps': toon['rough'] < 0.19,
         # ⑤ 赛璐璐几乎不靠描边：关掉描边后 rough 应明显更低，
         #    但 darkFrac 几乎不变（证明暗部来自色块而非描线）。
@@ -209,18 +229,41 @@ with sync_playwright() as p:
         'cel_edge_has_effect': cel_edgelo['rough'] < cel_noedge['rough'] * 1.6
                                and abs(cel_edgelo['mean'] - cel_noedge['mean']) > 5,
         # ⑦ Kuwahara 有牙齿：大半径更平且色数更少
-        'cel_kuwahara_flattens': cel_r5['rough'] < cel_r1['rough'] * 0.85
-                                 and cel_r5['uniq'] < cel_r1['uniq'] * 0.80,
+        # 实测 r5 vs r1（关描边、开 DoG）：rough .108 vs .113、uniq 157 vs 232。
+        # rough 差距只有 4%（DoG 的线在两种半径下都存在，摊薄了差异），
+        # 所以主判据用 uniq，rough 只做同向确认。
+        'cel_kuwahara_flattens': cel_r5['uniq'] < cel_r1['uniq'] * 0.80
+                                 and cel_r5['rough'] <= cel_r1['rough'],
         # ⑧ posterize 有牙齿：色阶数控制色数
         'cel_levels_control_colors': cel_l2['uniq'] < cel_l16['uniq'] * 0.90,
+        # ⑨ DoG 单侧加深（Anime4K Darken 移植）必须真的在画线：
+        #    关掉后色数明显减少（线本身贡献色阶），且画面更亮。
+        #    实测 dogStr 0 -> 0.8：uniq 105->162、mean 95.1->91.6、rough .134->.162
+        'cel_dog_draws_lines': cel['uniq'] > cel_nodog['uniq'] * 1.20
+                               and cel['mean'] < cel_nodog['mean'],
+        # ⑩ **DoG 必须是单侧的（min(diff,0)），不能是双侧的（-abs(diff)）。**
+        #    单侧只加深"比周围暗"的一半，亮侧不动 -> 加深已有的暗线；
+        #    双侧两边都上墨 -> 肤色的自然过渡被描成脏斑（旧版 Sobel 的病）。
+        #    阈值用 rough 而不是 darkFrac：破坏对照实测（dogStr=4.0）
+        #      单侧 dark .460 rough .320
+        #      双侧 dark .521 rough .491   <- darkFrac 差 13%，rough 差 53%
+        #    darkFrac 在 DoG 框架内区分度不足（DoG 差值幅度本就小于 Sobel 梯度，
+        #    两版都撞不穿 0.55），所以那个写法是**永真的**，已改用 rough。
+        'cel_dog_single_sided': cel_doghi['rough'] < 0.40,
 
         # --- toon filter（第二风格，按 V 可切）---
         # 它的暗部主要来自 Sobel 描线，判据用 ink
         'toon_ink_present': toon['ink'] > 0.10,
         'toon_ink_not_flooding': toon['ink'] < 0.32,
         # 两种风格必须真的不一样（否则 uVecStyle 是死开关）
+        # 两种风格必须真的不一样（否则 uVecStyle 是死开关）。
+        # 判据用**亮度**和**暗部结构**，不用 rough：
+        # DoG 只在赛璐璐档生效后，两档 rough 反而接近（.162 vs .180，比值 1.113），
+        # 而 mean 差 22.8、ink 差 0.186、dark 差 0.178 —— 后者才是本质差异
+        # （赛璐璐是"亮平色块 + 大块暗面"，toon 是"暗底 + 细描线"）。
         'styles_differ': abs(toon['mean'] - cel['mean']) > 15
-                         and toon['rough'] > cel['rough'] * 1.15,
+                         and abs(toon['ink'] - cel['ink']) > 0.10
+                         and abs(toon['darkFrac'] - cel['darkFrac']) > 0.10,
 
         'no_pageerror': not errs,
     }
@@ -235,7 +278,8 @@ with sync_playwright() as p:
                  for k, v in [('raw', raw), ('cel', cel), ('cel_noedge', cel_noedge),
                               ('cel_edgelo', cel_edgelo), ('cel_r1', cel_r1),
                               ('cel_r5', cel_r5), ('cel_l2', cel_l2),
-                              ('cel_l16', cel_l16), ('toon', toon)]},
+                              ('cel_l16', cel_l16), ('cel_nodog', cel_nodog),
+                              ('cel_doghi', cel_doghi), ('toon', toon)]},
         'shader_err': shader_err, 'errors': errs, 'checks': checks,
     }
     print(json.dumps(out, ensure_ascii=False, indent=1))
