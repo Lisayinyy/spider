@@ -127,7 +127,7 @@
 
 <div id="hud">
   <div id="mode"><span class="led"></span><span id="modeTxt">待机 · IDLE</span></div>
-  <div id="tip">捏合拇指+食指 → 穿上战衣　|　双手各摆一个 L → 拉开传送窗</div>
+  <div id="tip">捏合拇指+食指 → 穿上战衣　|　双手各摆一个 L → 拉开矢量斜带　|　C 换画风</div>
 </div>
 
 <div id="panel">
@@ -187,8 +187,9 @@
     <p>浏览器端实时人体换肤：MediaPipe 抠人体 + 识别手势，WebGL 片元着色器把你身上程序化生成一整套战衣（六边形布料、蛛网、胸口蛛徽、大白眼面罩），全程无素材、无上传、不联网推流。</p>
     <div class="gestures">
       <div class="g"><span>🤏</span><span><b>拇指 + 食指捏合</b> <em>— 开关全身战衣，捏合点会炸开一圈冲击波</em></span></div>
-      <div class="g"><span>👌</span><span><b>双手各摆一个 L</b>（拇指食指张开、其余三指收起）<em>— 在两手之间拉开一扇「传送窗」，只有窗内的你会变身</em></span></div>
-      <div class="g"><span>✋</span><span><b>双手放下 / 合拢</b> <em>— 窗口收拢，恢复现实</em></span></div>
+      <div class="g"><span>👌</span><span><b>双手各摆一个 L</b>（拇指食指张开、其余三指收起）<em>— 拉开一条贯穿画面的横向斜带：食指连线是上边、拇指连线是下边，带内的你和背景一起变成矢量插画</em></span></div>
+      <div class="g"><span>✋</span><span><b>双手放下 / 合拢</b> <em>— 斜带收拢，恢复现实</em></span></div>
+      <div class="g"><span>🎨</span><span><b>按 C 换画风</b> <em>— 赛璐璐（大色块平涂，参考视频那种）↔ 描边（细线条 toon）</em></span></div>
     </div>
     <button class="primary" id="go">开启摄像头 · 进入</button>
     <p class="note">画面只在本机处理。需要 <code>https://</code> 或 <code>localhost</code> 才能访问摄像头。<b>请用 Chrome / Edge 打开</b> —— 应用内置浏览器给出的摄像头轨道是 muted 的（灯亮但不吐画面），必然黑屏。快捷键：<code>F</code> 全身　<code>1/2/3</code> 换皮　<code>H</code> 收面板　<code>D</code> 骨骼　<code>I</code> 诊断</p>
@@ -1753,7 +1754,7 @@ async function initMP(){
 
   const okCnt = [mpState.h,mpState.s,mpState.f].filter(v=>v===2).length;
   setLoadTip(okCnt >= 2
-    ? '捏合拇指+食指 → 穿上战衣　|　双手各摆一个 L → 拉开传送窗'
+    ? '捏合拇指+食指 → 穿上战衣　|　双手各摆一个 L → 拉开矢量斜带　|　C 换画风'
     : '部分模型未就位 · 可用面板按钮手动变身');
   window.__MP_STATE__ = mpState;
 }
@@ -2505,6 +2506,19 @@ addEventListener('keydown', e=>{
     S.vecMode = (S.vecMode==='live') ? 'plate' : 'live';
     const m = $('#modeTxt');
     if(m) m.textContent = S.vecMode==='live' ? '实时矢量 · LIVE' : '静态底图 · PLATE';
+  }
+  /* C：切换带内画风 —— 赛璐璐（参考视频那种大色块平涂）↔ toon filter（细描边）
+     两档的参数是分别调出来的，不能只切 uVecStyle：
+     赛璐璐要少色阶 + 高描边阈值，toon 要多色阶 + 低阈值。
+     提示文字复用 #modeTxt（HUD 里唯一的状态行；#styleTxt 不存在，
+     而且 hudTick 每帧会按 portal/suit 覆写它，所以这里只做一次性提示）。 */
+  else if(k==='c'){
+    const cel = S.p.vecStyle < 0.5;
+    S.p.vecStyle  = cel ? 1 : 0;
+    S.p.vecLevels = cel ? 3 : 6;
+    S.p.vecEdge   = cel ? 0.22 : 0.14;
+    const m = $('#modeTxt');
+    if(m) m.textContent = cel ? '赛璐璐 · CEL' : '描边 · TOON';
   }
 });
 
