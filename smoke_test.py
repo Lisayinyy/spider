@@ -595,16 +595,34 @@ def main():
         for _ in range(6):
             st1 = page5.evaluate(MK, [[0.30, 0.50, 4.0], [0.70, 0.50, 4.0]])
         check("双 L 手势开窗（portalTarget=1）", st1["target"] == 1, st1)
-        check("quad 角点收敛到指尖位置", abs(st1["quad"][0][0] - 0.30) < 0.03
-              and abs(st1["quad"][2][0] - 0.70) < 0.03, st1["quad"])
+        # quad 不再等于指尖 —— 它已被 bandFromFingers 外推成贯穿画面的横向斜带
+        # （参考视频的真实形态，见 live_vector_test.py 文件头）。
+        # 所以这里改验两件事：① 左右外推出画面；② 上下边界仍由指尖 y 导出。
+        _q1 = st1["quad"]
+        _xs = [p[0] for p in _q1]
+        check("斜带左右外推出画面（贯穿）", min(_xs) < -0.05 and max(_xs) > 1.05, _q1)
+        # 两只手的食指 y=0.50-0.13=0.37、拇指 y=0.50+... 由 MK 的 open 参数决定；
+        # 只断言上边中点明显高于下边中点（顺序正确、厚度非零）。
+        _top = (_q1[0][1] + _q1[1][1]) / 2
+        _bot = (_q1[2][1] + _q1[3][1]) / 2
+        check("斜带上下边界由指尖导出（上在下之上且有厚度）",
+              _top < _bot - 0.05, [_top, _bot])
         # 2) 迟滞：手指半合（open=0.5，低于开窗阈 0.75、高于维持阈 0.20）-> 窗口不掉
         st2 = page5.evaluate(MK, [[0.30, 0.50, 0.5], [0.70, 0.50, 0.5]])
         check("迟滞：手指半合窗口不闪断", st2["target"] == 1, st2)
         # 3) teleport rejection：单帧整体跳 0.5 屏 -> quad 不动；连续第 2 帧 -> 接受
+        # 外推后角点在画面外，绝对 x 不再可比 —— 改用斜带**中心**（外推关于中心对称，
+        # 不改变中心），中心才是"窗口有没有被跳变帧带跑"的正确观测量。
+        _mid = lambda q: [sum(p[0] for p in q)/4, sum(p[1] for p in q)/4]
+        _m0 = _mid(st1["quad"])
         stJ1 = page5.evaluate(MK, [[0.10, 0.20, 4.0], [0.50, 0.20, 4.0]])
-        check("孤立跳变帧被丢弃（quad 原地）", abs(stJ1["quad"][0][0] - 0.30) < 0.05, stJ1["quad"])
+        _m1 = _mid(stJ1["quad"])
+        check("孤立跳变帧被丢弃（斜带中心原地）",
+              abs(_m1[0] - _m0[0]) < 0.05 and abs(_m1[1] - _m0[1]) < 0.05, [_m0, _m1])
         stJ2 = page5.evaluate(MK, [[0.10, 0.20, 4.0], [0.50, 0.20, 4.0]])
-        check("连续第 2 帧跳变被接受（真移动了）", stJ2["quad"][0][0] < 0.25, stJ2["quad"])
+        _m2 = _mid(stJ2["quad"])
+        check("连续第 2 帧跳变被接受（斜带中心真移动了）",
+              abs(_m2[0] - _m0[0]) > 0.05 or abs(_m2[1] - _m0[1]) > 0.05, [_m0, _m2])
         # 4) 掉帧保持：检测断了 -> 0.9s 内窗口保持，之后才收
         stH = page5.evaluate(MK, [])
         check("检测掉帧后窗口按时间保持（不立刻收）", stH["target"] == 1, stH)

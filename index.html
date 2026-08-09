@@ -284,6 +284,7 @@ uniform float uVecMix;      // 矢量化混合强度 0..1
 uniform float uVecRad;      // Kuwahara 采样半径（像素）
 uniform float uVecLevels;   // posterize 色阶数
 uniform float uVecEdge;     // Sobel 描边阈值
+uniform float uVecStyle;    // 0=toon filter（细描边+多色阶） 1=赛璐璐（少档硬边+高饱和）
 uniform int   uHasPlate;
 
 uniform vec2  uRes;         // canvas 像素
@@ -695,8 +696,21 @@ void main(){
     float L = max(uVecLevels, 2.0);
     float lin = dot(flat3, vec3(0.2125,0.7154,0.0721));
     // 亮度重映射：黑位抬到 0.16、白位压到 0.97，再走一次 gamma 0.78 提亮中调
-    float lo = 0.16, hi = 0.97;
-    float lm = pow(clamp(lin, 0.0, 1.0), 0.78);
+    /* 黑位/白位/gamma 按风格分开。
+       toon filter 要「整体提亮不死黑」，所以黑位抬到 0.16、gamma 0.78。
+       赛璐璐相反：它的暗部是**画上去的阴影色块**，不是描边 ——
+       归因实测（style=1 L=4 逐项关掉）：
+         关顶档提亮   mean 128.7 (无变化)
+         关硬高光     mean 127.8 (-0.9)
+         关饱和差异   mean 128.8 (+0.1)
+         关描边差异   mean  89.3 (-39.4)  <- 唯一主因
+       即之前「赛璐璐不暗」纯粹是因为我把描边关了，而阴影档根本没生成。
+       赛璐璐必须自己有暗档：黑位压到 0.05、gamma 抬到 1.0（不提中调），
+       让暗面真的落进最低档形成阴影色块。 */
+    float lo = mix(0.16, 0.05, uVecStyle);
+    float hi = mix(0.97, 0.99, uVecStyle);
+    float gam = mix(0.78, 1.00, uVecStyle);
+    float lm = pow(clamp(lin, 0.0, 1.0), gam);
     lm = lo + (hi - lo) * lm;
     /* 只量化明度。硬 floor 的档位边界会逐像素抖动 —— 归因实测（真人 ROI，
        rough = 相邻像素亮度差>14 的占比）：
@@ -708,15 +722,39 @@ void main(){
     float lp = lm * L;
     float fi = floor(lp);
     float fr = lp - fi;                       // 档内位置 0..1
-    float soft = smoothstep(0.5 - 0.11, 0.5 + 0.11, fr);
-    float lq = (fi + 0.62 + soft) / L;
+    /* 过渡宽度按风格切换：
+       toon filter（uVecStyle=0）要柔和过渡带（0.11 档）压锯齿；
+       赛璐璐（uVecStyle=1）要的正是**硬边界**（动画上色的「二值阴影」），
+       过渡收到 0.035 档 —— 边界依然抗锯齿，但读起来是刀切的色块。
+       参考帧实测：作者那条斜带里脸颊亮面/暗面之间是一条清晰硬边，
+       不是渐变，所以这里不能沿用 toon 的软过渡。 */
+    float qSoft = mix(0.11, 0.035, uVecStyle);
+    float soft = smoothstep(0.5 - qSoft, 0.5 + qSoft, fr);
+    /* 档内偏移必须用 0.5（档中心）。原来写 0.62 是给 L=6 调出来的，
+       但那 0.12 的偏移会被 /L 放大成 0.12/L 的亮度抬升 —— L 越小抬得越狠：
+       L=6 抬 0.020，L=3 抬 0.040。实测 mean 随 L 单调变化
+       （L=3 -> 140.9 / L=4 -> 135 / L=6 -> 115 / L=12 -> 105.6），
+       就是这个 L 相关的偏移在作祟，跟色阶数本身无关。
+       换成 0.5 后偏移为零，亮度只由前面的重映射（lo/hi/gamma）决定。 */
+    float lq = (fi + 0.5 + soft) / L;
     lq = clamp(lq, lo, hi);
+    /* 赛璐璐的亮面要「铺满」而不是均匀分档：把落在最高一档的像素往白位
+       提一点，形成大面积平亮的皮肤/衣物，暗档保持不动做阴影。
+       实测坑：把顶档整体拉到 0.55*hi 会让**整张脸**都进顶档（真人肤色
+       亮度大量落在最高档），mean 冲到 139、读作过曝橙红块。
+       所以提亮幅度必须小（0.18），并且只作用在顶档 —— 大面积平色由
+       量化本身提供，不靠额外提亮。 */
+    float topBand = step(L - 1.5, fi);
+    lq = mix(lq, mix(lq, hi, 0.18), uVecStyle * topBand);
     /* 色相/饱和保持连续：用色度（原色 - 灰）按新明度重新着色。
        注意色度必须**按明度变化比例同步放大**：亮度从 lin 抬到 lq 之后，
        原样搬过来的色度相对新亮度就被稀释了，画面读作灰绿而不是插画的明亮色。
        再叠一个固定增益让色块更艳（矢量插画的色通常比照片饱和）。 */
     float lift = lq / max(lin, 0.08);
-    vec3 chroma = (flat3 - vec3(lin)) * clamp(lift, 0.6, 2.6) * 1.55;
+    // 赛璐璐的色比 toon filter 更饱和（动画上色用的是纯色卡，不是照片色）
+    // 赛璐璐 2.10 实测过曝（脸变橙红块），收到 1.70
+    float satGain = mix(1.55, 1.70, uVecStyle);
+    vec3 chroma = (flat3 - vec3(lin)) * clamp(lift, 0.6, 2.6) * satGain;
     vec3 post = clamp(vec3(lq) + chroma, 0.0, 1.0);
     // ③ Sobel 描边：在**平滑后**的亮度上取梯度，避免噪点被当成边
     float gx = 0.0, gy = 0.0;
@@ -739,7 +777,18 @@ void main(){
     float ink = smoothstep(uVecEdge, uVecEdge*1.35, mag);
     // 墨色取本色的暗调而非纯黑：手绘描线通常是深色但带本身色相
     vec3 lineC = post * 0.30;
-    vecCol = mix(post, lineC, ink * 0.85);
+    /* 描边强度按风格切换。参考帧里作者那条斜带**几乎没有描边** ——
+       日漫赛璐璐的轮廓线是画师单独勾的线稿，不是从照片梯度里算出来的；
+       用 Sobel 硬描只会把脸上的明暗界线也描出来，读作「脏」。
+       所以赛璐璐档把描边压到 0.22（只在最强的结构边留一丝），
+       toon filter 档保留 0.85。 */
+    float inkGain = mix(0.85, 0.22, uVecStyle);
+    vecCol = mix(post, lineC, ink * inkGain);
+    /* 赛璐璐的硬高光：在最亮的地方点一块接近纯白的平色。
+       判据用「重映射后的亮度落在顶档 且 原始亮度也高」，避免把
+       噪点提成白斑。 */
+    float spec = step(hi - 0.10, lq) * step(0.62, lin);
+    vecCol = mix(vecCol, mix(vecCol, vec3(1.0), 0.42), spec * uVecStyle);
     camCol = mix(camCol, vecCol, vecAmt);
   }
 
@@ -1541,7 +1590,7 @@ const S = {
   vecMode:'live',
   p:{ suitAmt:1, webDens:13, hexScale:120, eyeSize:1, soft:1.6, rim:1.1, cyber:0.55, gloss:0.55, hood:1,
      // 实时矢量化参数（Kuwahara 半径 / posterize 色阶 / Sobel 阈值）
-     vecMix:1, vecRad:5.0, vecLevels:6, vecEdge:0.14 }
+     vecMix:1, vecRad:5.0, vecLevels:3, vecEdge:0.22, vecStyle:1 }
 };
 
 /* ---------------------------------------------------------------- 摄像头 */
@@ -1849,6 +1898,37 @@ function analyzeGrid(g){
 }
 
 /* ---------------------------------------------------------------- 手势 */
+/* 把「两手食指/拇指围成的小四边形」外推成**贯穿画面的横向斜带**。
+
+   参考视频（ref/vecframes/f05.jpg，3x 放大 + 10% 网格逐格读出）的真实几何：
+     左手食指尖 (27%,30%)  右手食指尖 (77%,32%)   ← 斜带上边界
+     左手拇指尖 (28%,58%)  右手拇指尖 (76%,57%)   ← 斜带下边界
+     带厚度 ≈ 28% 画面高度；**左右一直延伸到画面外**（x 从 0 到 1 全覆盖），
+     不是只在两手之间那一小块 —— 这是我之前做成「方框取景窗」最大的形似偏差。
+   所以手势规则本身（食指连线=上边、拇指连线=下边）原来就对，
+   只需要沿上下两条边各自的方向把左右端点推到画面外。
+
+   外推用**每条边自己的方向向量**（不是统一水平），这样带的倾斜角
+   完全由手的姿态决定：左右手一高一低，带就跟着斜。 */
+const BAND_EXTEND = 1.35;   // 外推倍数：>1 保证推出画面（含 aspect 拉伸余量）
+function bandFromFingers(pts){
+  // pts 顺序 = [A食指, B食指, B拇指, A拇指]（A 在左）
+  const [aI, bI, bT, aT] = pts;
+  const ext = (p, q) => {
+    // 沿 p->q 方向把两端各推出去，返回外推后的 [p', q']
+    const dx = q[0]-p[0], dy = q[1]-p[1];
+    const len = Math.hypot(dx, dy) || 1e-5;
+    const ux = dx/len, uy = dy/len;
+    const grow = BAND_EXTEND;      // 以当前边长为单位向两侧各推 grow 倍
+    return [[p[0]-ux*len*grow, p[1]-uy*len*grow],
+            [q[0]+ux*len*grow, q[1]+uy*len*grow]];
+  };
+  const [tL, tR] = ext(aI, bI);    // 上边（食指连线）外推
+  const [bL, bR] = ext(aT, bT);    // 下边（拇指连线）外推
+  // 保持原来的角点环绕顺序：上左 → 上右 → 下右 → 下左
+  return [tL, tR, bR, bL];
+}
+
 function handMetrics(lm){
   const d=(a,b)=>Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y);
   const scale = Math.max(d(0,9), 0.04);
@@ -1881,7 +1961,7 @@ function onGesture(list){
     // 面积闸：四点几乎共线/太小 = 不是取景手势（活跃时放宽，防止收窗途中闪断）
     let area = 0;
     for(let i=0;i<4;i++){ const p=pts[i], q2=pts[(i+1)%4]; area += p[0]*q2[1]-q2[0]*p[1]; }
-    if(Math.abs(area/2) >= (S.portalTarget>0.5 ? 0.0005 : 0.005)) target = pts;
+    if(Math.abs(area/2) >= (S.portalTarget>0.5 ? 0.0005 : 0.005)) target = bandFromFingers(pts);
   }
   if(target){
     const moved = target.reduce((s,p,i)=>s+Math.hypot(p[0]-S.winQ[i][0], p[1]-S.winQ[i][1]), 0)/4;
@@ -2226,6 +2306,7 @@ function drawFrame(t, shockAge){
   gl.uniform1f(u('uVecRad'), p.vecRad);
   gl.uniform1f(u('uVecLevels'), p.vecLevels);
   gl.uniform1f(u('uVecEdge'), p.vecEdge);
+  gl.uniform1f(u('uVecStyle'), p.vecStyle);
   gl.uniform1i(u('uSkin'), S.skin);
   gl.uniform1i(u('uDebug'), S.debugMode !== null ? S.debugMode : (S.debug?1:0));
 
